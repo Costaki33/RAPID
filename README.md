@@ -42,44 +42,39 @@ This assumes the core stack is already installed. Swap `onnxruntime-gpu` for `on
 
 ```bash
 cd RAPID
-
-# Single config sanity check, runs in ~a minute on one GPU.
+ 
+# Single config sanity check, runs in ~a minute on one GPU
 python scripts/run_benchmark.py \
-    --dataset-dir /home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/data/580_stations_1_min_dt/20241215T120000Z_20241215T120100Z \
+    --dataset-dir /path/to/data/20241215T120000Z_20241215T120100Z \
     --model PhaseNet --child original \
     --backend lean_pytorch --dtype fp16 \
     --device cuda:0 --n-stations 228 --batch-size 256 --repeats 3
-
-# Pipelined path — the "production" fast path (parallel CPU preprocess
-#      + megabatched single-GPU forward with CPU↔GPU overlap). This is the
-#      configuration that actually beats annotate().
+ 
+# Pipelined single-GPU (the fast path: parallel CPU preprocess
+# feeding megabatched GPU forward with CPU<->GPU overlap)
 python scripts/run_pipelined.py \
     --dataset-dir "$DATA_DIR" --model PhaseNet --child original \
     --n-stations 580 --batch-size 256 --dtype fp16 \
     --mode single_gpu --n-cpu-workers 16 --repeats 3
-
-# Fair dual-GPU comparison — runs SeisBench's annotate() on 2 GPUs
-#       (one loaded model per GPU, stations split 50/50).
+ 
+# Fair dual-GPU baseline: SeisBench annotate() on 2 GPUs, stations split 50/50
 python scripts/run_pipelined.py \
     --dataset-dir "$DATA_DIR" --model PhaseNet --child original \
     --n-stations 580 --mode baseline_dual_gpu --repeats 3
-
-# Pipelined dual-GPU — our fast path across 2 GPUs. Each GPU shard
-#        runs its own CPU preprocess pool (``--n-cpu-workers`` per GPU) feeding
-#        its own inference actor. This is what the matrix runner now uses for
-#        ``kind=dual_gpu`` on lean backends.
+ 
+# Pipelined dual-GPU: each GPU shard runs its own CPU preprocess pool
 python scripts/run_pipelined.py \
     --dataset-dir "$DATA_DIR" --model PhaseNet --child original \
     --n-stations 580 --batch-size 512 --dtype bf16 \
     --mode dual_gpu --n-cpu-workers 8 --repeats 3
-
-# Smoke matrix (PhaseNet only, 32 stations, a couple of batch sizes).
+ 
+# Smoke matrix (PhaseNet only, 32 stations, a few batch sizes)
 python scripts/run_matrix.py --config configs/smoke.json
-
-# Full matrix run (all 4 models × 4 N × 5 backends × 9 batch sizes × 3 repeats).
+ 
+# Full matrix (all 4 models x 4 station counts x 5 backends x 9 batch sizes x 3 repeats)
 python scripts/run_matrix.py --config configs/full_matrix.json
-
-# Render every plot from the resulting JSONL.
+ 
+# Render plots from the resulting JSONL
 python scripts/make_plots.py --jsonl results/matrix.jsonl --out-dir figures
 ```
 
