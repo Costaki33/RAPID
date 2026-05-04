@@ -105,19 +105,19 @@ Then add the exported paths to `configs/full_matrix.json`:
 { "name": "tensorrt", "dtype": "fp16", "engine_path": "models_exported/trt/PhaseNet_original_fp16.plan", "max_batch_size": 1024 }
 ```
 
-## Pick quality (catalog ground truth and optional A/B drift)
-
-We now evaluate picks against **catalog ground truth** on the SeisBench evaluation traces (the 100-event manual-pick validation set is reflected in those catalog columns). The dtype / timing matrix appends `pick_quality` on every trial, including median absolute onset offset vs catalog P and S (`onset_delta_*_vs_catalog` in samples at the model sampling rate). Run it with:
-
+## Pick quality
+ 
+Pick quality is evaluated against catalog ground truth on the SeisBench evaluation traces (100-event manual-pick validation set). Every trial in the dtype / timing matrix appends `pick_quality`, including median absolute onset offset vs catalog P and S (`onset_delta_*_vs_catalog` in samples at model sampling rate).
+ 
 ```bash
 cd RAPID
 python scripts/run_seisbench_matrix.py --config configs/seisbench_dtype_matrix.json
 ```
-
-Use `traces_per_dataset` in the JSON config to control how many traces are drawn per dataset (100 is our standard for the publication matrix). For a sweep of probability and pick drift **vs FP32** on miniSEED workloads (separate from SeisBench), there is also `scripts/run_quality_matrix.py`.
-
-For a **quick same-waveform A/B** on any local miniSEED time chunk (no catalog required), FP16 vs FP32 on `lean_pytorch`:
-
+ 
+Use `traces_per_dataset` in the JSON config to control how many traces are drawn per dataset (100 is standard for the publication matrix).
+ 
+For a quick same-waveform FP16 vs FP32 comparison on any local miniSEED chunk (no catalog needed):
+ 
 ```bash
 python scripts/compare_fp16_fp32.py \
     --dataset-dir /path/to/timechunk \
@@ -125,12 +125,10 @@ python scripts/compare_fp16_fp32.py \
     --device cuda:0 --n-stations 228 \
     --out-json results/fp16_vs_fp32_PhaseNet.json
 ```
-
-That script reports:
-
-- probability trace drift (MAE, max absolute error, RMSE, Pearson correlation)
-- pick-time delta at a threshold (median, p95, max — in samples @ model sr)
-- speedup FP16 over FP32
+ 
+Reports probability trace drift (MAE, max absolute error, RMSE, Pearson correlation), pick-time delta at threshold (median, p95, max — in samples at model sr), and FP16 speedup over FP32.
+ 
+For a broader sweep of probability and pick drift vs FP32 on miniSEED workloads, there's also `scripts/run_quality_matrix.py`.
 
 
 ## What each timed stage means
@@ -163,88 +161,3 @@ tell them apart and plot the evolution side by side.
 | 5   | `dual_gpu_serial`  | `2gpu_serial`                         | Lean path, 2 GPUs, single-threaded preprocess per shard (no CPU pool). Kept for the evolution comparison; roughly equivalent to #3 on half the stations per shard. |
 | 6   | `dual_gpu`         | `2gpu_cpuN`                           | Lean path, 2 GPUs, each shard runs its own N-worker CPU preprocess pool (pipelined).                                                                               |
 | 7   | `cpu_worker_sweep` | `cpu_infer_poolN[_tT]` (device `cpu`) | Lean path, CPU inference, N parallel CPU preprocess workers feeding one CPU inference actor pinned to `T` BLAS threads (or auto-split when `T` is absent).         |
-
-
-Typical progression seen in the data:
-**#3 → #5** (serial, 1 GPU → 2 GPUs): small gain — preprocess still serial per shard.
-**#1 → #2** (baseline, 1 GPU → 2 GPUs): small gain — asyncio overhead eats most of the compute win.
-**#1 → #4** (pool preprocess on 1 GPU): large gain — preprocess is parallelized.
-**#4 → #6** (pool + 2 GPUs): compounding gain — both axes optimized.
-
-### Why CPU speedups plateau well before GPU
-
-Family #7 (`cpu_worker_sweep` on `device="cpu"`) applies the same
-parallel-preprocess + megabatch-inference pipeline to the CPU backend, so
-you can compare evolution #1 → #7 the same way you do #1 → #4 on GPU. The
-ceiling is much lower though, because of a hard physical asymmetry:
-
-- **GPU** preprocessing and inference live on *different silicon*. Adding
-CPU preprocessing workers is free — they don't steal from the GPU.
-Net: `wall ≈ max(preprocess_parallel, gpu_forward)`. 3-4× speedups are
-normal.
-- **CPU** preprocessing and inference share the *same cores*. Every
-preprocessing worker we add literally takes BLAS threads away from
-the inference actor. Net: `wall ≈ preprocess_parallel(k_pre) + inference(k_inf)` with `k_pre + k_inf ≤ N_cores`. Realistic speedups
-land in the 1.3-1.8× range unless we switch compute backends (IPEX,
-ONNX Runtime CPU) to get more throughput from the same cores.
-
-The runner prevents BLAS over-subscription by pinning each preprocess
-worker to 1 thread and giving the inference actor
-`max(1, N_cores - n_cpu_workers - 1)` BLAS threads (tunable explicitly via
-the `cpu_infer_threads` config axis). Writing the wrong split (e.g. 16
-preprocess workers *and* 16 BLAS threads for inference on a 20-core box)
-produces the oversubscription penalty that tanks throughput by 2-3× —
-that's exactly what the sweep is designed to find.
-
-Config knobs (in `configs/full_matrix.json`):
-
-```json
-"cpu_worker_sweep": [1, 2, 4, 8, 12, 16, 20],
-"cpu_worker_sweep_on_cpu": true,
-"cpu_infer_threads": []
-```
-
-- `cpu_worker_sweep_on_cpu`: enable family #7. New rows get
-`device="cpu"` so they never collide with existing GPU-path cells on
-resume; no existing data needs re-running.
-- `cpu_infer_threads`: explicit thread-count axis for the CPU inference
-actor. Empty = auto-split. Supply e.g. `[4, 8, 12, 16]` to sweep the
-preprocess/inference core split.
-
-### Dual-GPU wall-time semantics
-
-For `kind: "dual_gpu"` and `kind: "dual_gpu_serial"` rows we emit two wall numbers.
-Both are persisted; pick whichever matches the question you're asking.
-
-
-| Column              | Meaning                                                                                                                                                                                                                           |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wall_time_s`       | Critical-path compute wall (slower of the two shards, excluding per-shard actor setup / model load / warmup). Apples-to-apples with single-GPU `cpu_worker_sweep.wall_time_s`. Use this for speedup comparisons.                  |
-| `end_to_end_wall_s` | Real first-call latency: Ray init, actor spawn, model load, warmup, work, teardown. Use this to reason about cold-start cost. In a persistent deployment the actors are reused, so this approaches `wall_time_s` over many calls. |
-
-
-`_bench_dual_gpu` uses `run_pipelined_dual_gpu` for lean backends and
-`run_baseline_dual_gpu` for `baseline_annotate`. `_bench_dual_gpu_serial`
-uses the original `run_dual_gpu` (one `run_lean_single` per shard, serial
-preprocess inside each actor) and is enabled by `dual_gpu_serial: true`
-in the matrix config (default on).
-
-## Folder map
-
-```
-RAPID/
-├── rapid/
-│   ├── backends/     # pluggable inference backends
-│   ├── runners/      # single-GPU, dual-GPU, CPU-worker-pool strategies
-│   ├── data.py       # station discovery, stream load, windowing, megabatching
-│   ├── export.py     # PyTorch -> ONNX -> TRT engine
-│   ├── matrix.py     # orchestrator + JSONL writer
-│   ├── quality.py    # FP16 vs FP32 drift + pick-time comparison
-│   ├── timing.py     # stage-level timers with CUDA sync
-│   └── visualize.py  # matplotlib plots
-├── scripts/          # CLI entry points
-├── configs/          # matrix configuration files
-├── models_exported/  # (gitignored) .onnx / .plan artifacts
-├── results/          # (gitignored) JSONL outputs
-└── figures/          # (gitignored) PNG/SVG plots
-```
