@@ -1,0 +1,24 @@
+{
+  "dataset_dir": "/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/data/580_stations_1_min_dt/20241215T120000Z_20241215T120100Z",
+  "models": [
+    { "parent": "PhaseNet", "child": "original", "label": "PhaseNet" }
+  ],
+  "n_stations_list": [32],
+
+  "backends": [
+    { "name": "baseline_annotate", "dtype": "fp32" },
+    { "name": "lean_pytorch",      "dtype": "fp32" },
+    { "name": "lean_pytorch",      "dtype": "fp16" }
+  ],
+
+  "devices": ["cuda:0"],
+  "batch_sizes": [32, 64],
+  "overlap_sweep": [0],
+  "repeats": 1,
+  "warmup_iters": 1,
+
+  "dual_gpu": false,
+  "cpu_worker_sweep": [],
+
+  "output_jsonl": "results/smoke.jsonl"
+}

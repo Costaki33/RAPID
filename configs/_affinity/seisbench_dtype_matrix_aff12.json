@@ -1,0 +1,96 @@
+{
+  "_comment": "LEAN SeisBench dtype matrix: GPU-first, smaller sweeps, ~O(10^5) rows vs 10^6+ for full grid. Numerical coverage: FP32/FP16/BF16 + torch.compile on FP32/BF16 only (drops fp16+compile to cut compile churn; EQT FP16 lean is skipped anyway). For full sweeps see seisbench_dtype_matrix_full.json.",
+  "_comment_devices": "Single GPU (cuda:0) avoids duplicating the whole grid on cuda:1. Add \"cuda:1\" if you need per-device deltas. CPU omitted here\u2014add \"cpu\" plus cpu_backends_override (short list) if you need CPU reference numbers without 6\u00d7 compile cost.",
+  "seisbench_datasets": [
+    "stead",
+    "txed"
+  ],
+  "traces_per_dataset": 100,
+  "models": [
+    {
+      "parent": "PhaseNet",
+      "child": "original",
+      "label": "PhaseNet"
+    },
+    {
+      "parent": "PhaseNetLight",
+      "child": "stead",
+      "label": "PhaseNetLight"
+    },
+    {
+      "parent": "EQTransformer",
+      "child": "original",
+      "label": "EQTransformer"
+    },
+    {
+      "parent": "EQTransformer",
+      "child": "original_nonconservative",
+      "label": "EQT-NC"
+    }
+  ],
+  "backends": [
+    {
+      "name": "baseline_annotate",
+      "dtype": "fp32"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp32"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp16"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "bf16"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp32",
+      "compile": true
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "bf16",
+      "compile": true
+    }
+  ],
+  "devices": [
+    "cuda:0"
+  ],
+  "n_stations_list": [
+    64,
+    256,
+    580
+  ],
+  "batch_sizes": [
+    64,
+    256,
+    512,
+    1024
+  ],
+  "overlap_sweep": [
+    0
+  ],
+  "n_samples": 6000,
+  "_comment_n_samples": "P-centered raw window length at model sampling rate (6000 \u2248 3000 samples before P when unclipped).",
+  "repeats": 2,
+  "warmup_iters": 1,
+  "seed": 42,
+  "output_jsonl": "results/seisbench_matrix_lean_aff12.jsonl",
+  "resume": true,
+  "require_catalog_s": false,
+  "include_baseline": true,
+  "prob_threshold": 0.3,
+  "dual_gpu": true,
+  "dual_gpu_serial": true,
+  "cpus": [
+    12
+  ],
+  "_comment_cpus": "Ignored unless dual_gpu is true. Short list for when you re-enable 2-GPU trials.",
+  "_comment_cpu_reference": "Example CPU spot-check: \"devices\": [\"cpu\", \"cuda:0\"], \"cpu_backends_override\": [{\"name\":\"lean_pytorch\",\"dtype\":\"fp32\"},{\"name\":\"lean_pytorch\",\"dtype\":\"fp16\"},{\"name\":\"lean_pytorch\",\"dtype\":\"bf16\"}]",
+  "resume_include_jsonl": [],
+  "_affinity_n_cpus": 12,
+  "_affinity_source_config": "/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/RAPID/configs/seisbench_dtype_matrix.json"
+}

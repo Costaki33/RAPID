@@ -1,0 +1,107 @@
+{
+  "_comment": "CPU-only phase: single-device sweep on device=cpu only. Existing successful rows in seisbench_matrix.jsonl are merged into the resume set (same cell keys) so CPU trials already written there are not re-run. Write to a dedicated output_jsonl (or your path) with resume=true.",
+  "_comment_backends": "cpu_backends_override trims the dtype sweep on CPU (no torch.compile by default\u2014matches the lean GPU matrix style for reference FP32/FP16/BF16).",
+  "seisbench_datasets": [
+    "stead",
+    "txed"
+  ],
+  "traces_per_dataset": 100,
+  "models": [
+    {
+      "parent": "PhaseNet",
+      "child": "original",
+      "label": "PhaseNet"
+    },
+    {
+      "parent": "PhaseNetLight",
+      "child": "stead",
+      "label": "PhaseNetLight"
+    },
+    {
+      "parent": "EQTransformer",
+      "child": "original",
+      "label": "EQTransformer"
+    },
+    {
+      "parent": "EQTransformer",
+      "child": "original_nonconservative",
+      "label": "EQT-NC"
+    }
+  ],
+  "backends": [
+    {
+      "name": "baseline_annotate",
+      "dtype": "fp32"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp32"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp16"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "bf16"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp32",
+      "compile": true
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "bf16",
+      "compile": true
+    }
+  ],
+  "cpu_backends_override": [
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp32"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "fp16"
+    },
+    {
+      "name": "lean_pytorch",
+      "dtype": "bf16"
+    }
+  ],
+  "devices": [
+    "cpu"
+  ],
+  "run_single_gpu": true,
+  "dual_gpu": false,
+  "n_stations_list": [
+    64,
+    256,
+    580
+  ],
+  "batch_sizes": [
+    64,
+    256,
+    512,
+    1024
+  ],
+  "overlap_sweep": [
+    0
+  ],
+  "n_samples": 6000,
+  "repeats": 2,
+  "warmup_iters": 1,
+  "seed": 42,
+  "output_jsonl": "results/seisbench_matrix_lean_cpu_aff16.jsonl",
+  "resume": true,
+  "resume_include_jsonl": [],
+  "require_catalog_s": false,
+  "include_baseline": true,
+  "prob_threshold": 0.3,
+  "cpus": [
+    16
+  ],
+  "_affinity_n_cpus": 16,
+  "_affinity_source_config": "/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/RAPID/configs/seisbench_dtype_matrix_cpu_only.json"
+}
