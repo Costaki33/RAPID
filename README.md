@@ -1,4 +1,4 @@
-# RAPID — faster-than-`annotate()` benchmarking toolkit
+# RAPID — faster-than-SeisBench's `annotate()` benchmarking toolkit
 
 This repository is part of a larger project focused on enabling real-time seismic phase picking for seismic event detection using deep learning models. 
 
@@ -29,7 +29,7 @@ conda activate rapid
 **2. Install the env library packages using environment.yml**
 
 
-**3. Install optional backend dependencies(ONNX, ONNX Runtime GPU, and related helpers; see [Optional backends](#optional-backends))**:
+**3. Install optional backend dependencies(ONNX, ONNX Runtime GPU, and related helpers; see Optional backends**:
 
 ```bash
 cd RAPID
@@ -83,25 +83,23 @@ python scripts/run_matrix.py --config configs/full_matrix.json
 python scripts/make_plots.py --jsonl results/matrix.jsonl --out-dir figures
 ```
 
-## Optional backends
-
-The ONNX / TensorRT backends need extra wheels (see `requirements-extra.txt`).
-After installing, export pretrained weights once:
-
+## Optional backends (ONNX / TensorRT)
+ 
+Export pretrained weights once after installing the extra dependencies:
+ 
 ```bash
-# ONNX for every model
+# ONNX only
 python scripts/export_models.py --onnx-dir models_exported/onnx --skip-trt
-
-# Then build TRT engines (pick your opt batch for the shape you'll process the most with)
+ 
+# ONNX + TRT engines (pick the opt batch for your most common shape)
 python scripts/export_models.py \
     --onnx-dir models_exported/onnx \
     --trt-dir  models_exported/trt \
     --opt-batch 228 --max-batch 1024
 ```
-
-Add the exported paths to `configs/full_matrix.json` under the ONNX/TensorRT
-backend entries:
-
+ 
+Then add the exported paths to `configs/full_matrix.json`:
+ 
 ```json
 { "name": "onnx",     "dtype": "fp32", "onnx_path": "models_exported/onnx/PhaseNet_original.onnx" },
 { "name": "tensorrt", "dtype": "fp16", "engine_path": "models_exported/trt/PhaseNet_original_fp16.plan", "max_batch_size": 1024 }
