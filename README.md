@@ -68,19 +68,16 @@ python scripts/run_pipelined.py \
     --n-stations 580 --batch-size 512 --dtype bf16 \
     --mode dual_gpu --n-cpu-workers 8 --repeats 3
  
-# Smoke matrix (PhaseNet only, 32 stations, a few batch sizes)
-python scripts/run_matrix.py --config configs/smoke.json
- 
 # Full matrix (all 4 models x 4 station counts x 5 backends x 9 batch sizes x 3 repeats)
 python scripts/run_matrix.py --config configs/full_matrix.json
  
-# Render plots from the resulting JSONL
+# Generate plots from the outputted JSONL file
 python scripts/make_plots.py --jsonl results/matrix.jsonl --out-dir figures
 ```
 
-## Optional backends (ONNX / TensorRT)
+## ONNX / TensorRT - Optional backends
  
-Export pretrained weights once after installing the extra dependencies:
+After installing the extra dependencies, you can export pretrained weights to ONNX
  
 ```bash
 # ONNX only
@@ -102,7 +99,7 @@ Then add the exported paths to `configs/full_matrix.json`:
 
 ## Pick quality
  
-Pick quality is evaluated against catalog ground truth on the SeisBench evaluation traces (100-event manual-pick validation set). Every trial in the dtype / timing matrix appends `pick_quality`, including median absolute onset offset vs catalog P and S (`onset_delta_*_vs_catalog` in samples at model sampling rate).
+Pick quality is evaluated against catalog ground truth on the SeisBench evaluation traces. Every trial in the dtype / timing matrix appends `pick_quality`, including median absolute onset offset vs catalog P and S (`onset_delta_*_vs_catalog` in samples at model sampling rate).
  
 ```bash
 cd RAPID
