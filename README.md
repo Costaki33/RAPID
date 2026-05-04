@@ -1,58 +1,49 @@
 # RAPID — faster-than-`annotate()` benchmarking toolkit
 
-This repository contains a backend-agnostic benchmarking framework for SeisBench pickers. Its job is to measure, break down, and beat SeisBench's `model.annotate()` wall time across a configurable matrix of:
-
-- **Models**: PhaseNet, PhaseNetLight (3001-sample window), EQTransformer,
-EQT-NC (6000-sample window). Adding EQCCT is a follow-on once its integratied into SeisBench.
-- **Backends**: `baseline_annotate` (unmodified SeisBench), `lean_pytorch`
-(FP32 / FP16 / BF16, with optional `torch.compile`), `onnx` (ONNX Runtime),
-`tensorrt` (prebuilt `.plan` engines). ONNX and TensorRT are optional —
-they're only registered if the packages import.
-- **Devices**: CPU and CUDA. Dual-GPU Ray runner supplies the parallel scaling
-baseline.
-- **Shapes**: station counts 228 / 256 / 512 / 580, batch-size sweep
-`{32, 64, 128, 228, 256, 384, 512, 768, 1024}`, overlap-samples sweep.
-- **Parallelism**: 1 actor on 1 GPU, **2 actors on 2 GPUs each with its own CPU
-preprocess pool** (pipelined), and single-GPU CPU preprocessing worker pool
-(1..20) feeding one GPU inference actor.
-
 This repository is part of a larger project focused on enabling real-time seismic phase picking for seismic event detection using deep learning models. 
 
 The preliminary work, [EQCCTPro/RAPID](https://github.com/ut-beg-texnet/eqcct/tree/main/eqcctpro), enabled sub-11s 3-C waveform processing using persistant model actors to handle 228 stations of 1-minute seismic data for production applications with the Texas Seismological Network (TexNet). This architecture was integrated into [SCMLPick](https://github.com/ut-beg-texnet/scmlpick), a SeisComP module that integrates deep learning models into the SeisComP interface for real-time seismic phase picking, serving as the backbone of the processing approach currently operational in producation at TexNet. 
 
 Further work is focused on improving processing speeds beyond the persistent actor approach by combing different levels of numerical precision with batching. Batching has been applied in SeisBench's `annotate()`, and preliminary trials show that we can achieve faster processing than `annotate()` through these techniques. Prelimary results can be found [here](RAPID_Seisbench_speedup.pdf), with final trials are being finalized for publication in the near future.
 
-## Conda environment
+## Models and backends
+ 
+**Models**: PhaseNet, PhaseNetLight (3001-sample window), EQTransformer, EQT-NC (6000-sample window). EQCCT is a planned addition once it's integrated into SeisBench.
+ 
+**Backends**:
+- `baseline_annotate` — unmodified SeisBench
+- `lean_pytorch` — FP32 / FP16 / BF16, with optional `torch.compile`
+- `onnx` — ONNX Runtime (optional; only registered if the package imports)
+- `tensorrt` — prebuilt `.plan` engines (optional; same)
 
-**1. Create and activate an env** (match the Python version to the PyTorch CUDA wheels you will install):
+## Setup: Conda environment
+
+**1. Create and activate an env**
+Make sure to match the Python version to the PyTorch CUDA wheels you will install.
 
 ```bash
 conda create -n rapid python=3.11 -y
 conda activate rapid
 ```
 
-**2. Install the core stack** the same way you do for EQCCTPro / SCMLPick: PyTorch with the CUDA build that matches your driver, plus ObsPy, NumPy, Ray, SeisBench, Matplotlib, and anything else your workflows need. Practical options:
+**2. Install the env library packages using environment.yml**
 
-- **`conda env create -f environment.yml`** from this `RAPID/` directory (pinned pip stack including PyTorch and SeisBench; adjust the env `name:` in that file if it clashes with an existing env), **or**
-- follow the parent **`eqcctpro`** repository `README.md` / `environment.yml` if you prefer to manage one env at the repo root.
 
-RAPID does not ship a single core `requirements.txt`; core pins live in those manifests.
-
-**3. Install RAPID optional backend pins** (ONNX, ONNX Runtime GPU, and related helpers; see [Optional backends](#optional-backends)):
+**3. Install optional backend dependencies(ONNX, ONNX Runtime GPU, and related helpers; see [Optional backends](#optional-backends))**:
 
 ```bash
 cd RAPID
 pip install -r requirements-extra.txt
 ```
 
-`requirements-extra.txt` assumes the core packages above are already present. Use `onnxruntime` instead of `onnxruntime-gpu` in that file if you only need CPU inference. TensorRT is distributed by NVIDIA for your CUDA toolkit version; follow the comments at the bottom of `requirements-extra.txt` for `tensorrt` / `pycuda`.
+This assumes the core stack is already installed. Swap `onnxruntime-gpu` for `onnxruntime` in that file if you only need CPU inference. TensorRT comes from NVIDIA for your specific CUDA toolkit version. See the comments at the bottom of `requirements-extra.txt` for more info.
 
 ## Quick start
 
 ```bash
 cd RAPID
 
-# Single config sanity check — runs in ~a minute on one GPU.
+# Single config sanity check, runs in ~a minute on one GPU.
 python scripts/run_benchmark.py \
     --dataset-dir /home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/data/580_stations_1_min_dt/20241215T120000Z_20241215T120100Z \
     --model PhaseNet --child original \
