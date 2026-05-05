@@ -1,5 +1,5 @@
 {
-  "_comment": "LEAN SeisBench dtype matrix: GPU-first, smaller sweeps, ~O(10^5) rows vs 10^6+ for full grid. Numerical coverage: FP32/FP16/BF16 + torch.compile on FP32/BF16 only (drops fp16+compile to cut compile churn; EQT FP16 lean is skipped anyway). For full sweeps see seisbench_dtype_matrix_full.json.",
+  "_comment": "LEAN SeisBench dtype matrix: GPU-first, smaller sweeps, ~O(10^5) rows vs 10^6+ for full grid. FP32 full-precision reference is baseline_annotate only (no lean_pytorch fp32). Lean sweep: FP16/BF16 + torch.compile (FP16+compile only where model_labels lists PhaseNet-style labels). EQT FP16 lean without compile is still skipped in the driver. For full sweeps see seisbench_dtype_matrix_full.json.",
   "_comment_devices": "Single GPU (cuda:0) avoids duplicating the whole grid on cuda:1. Add \"cuda:1\" if you need per-device deltas. CPU omitted here\u2014add \"cpu\" plus cpu_backends_override (short list) if you need CPU reference numbers without 6\u00d7 compile cost.",
   "seisbench_datasets": [
     "stead",
@@ -35,10 +35,6 @@
     },
     {
       "name": "lean_pytorch",
-      "dtype": "fp32"
-    },
-    {
-      "name": "lean_pytorch",
       "dtype": "fp16"
     },
     {
@@ -47,8 +43,12 @@
     },
     {
       "name": "lean_pytorch",
-      "dtype": "fp32",
-      "compile": true
+      "dtype": "fp16",
+      "compile": true,
+      "model_labels": [
+        "PhaseNet",
+        "PhaseNetLight"
+      ]
     },
     {
       "name": "lean_pytorch",

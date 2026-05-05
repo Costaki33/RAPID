@@ -13,8 +13,10 @@ before P and the remainder after, clipped to the resampled trace); both baseline
 and lean then use the same segment, with lean further cropped to ``in_samples``
 for the model via ``cut_window``. ``pick_quality`` always
 uses predictions for the **first duplicate** (``pick_quality_station_index=0``);
-non-FP32 dtypes compare argmax drift vs the FP32 lean prediction in the same
-``(overlap, batch_size, n_stations)`` cell.
+non-FP32 lean dtypes compare argmax drift vs the FP32 lean prediction from the same
+``(overlap, batch_size, n_stations)`` cell when ``lean_pytorch`` **fp32** is included
+in ``cfg.backends``; otherwise drift vs FP32 lean is not computed (FP32 quality
+reference is still ``baseline_annotate`` on the merged or first-duplicate stream).
 
 When ``dual_gpu`` is enabled and two CUDA devices exist, the **same**
 ``n_stations`` duplicate-stream list as the single-GPU path is split into two
@@ -31,10 +33,11 @@ trials emit ``runner="lean_pytorch_dual_pipelined"`` with
 ``n_cpu_workers_per_gpu`` = the CPU count and ``cpu_affinity_set`` = the actual
 mask. When ``dual_gpu_serial=True`` an additional **unpinned** trial runs as
 ``runner="lean_pytorch_dual_serial"`` (``n_cpu_workers_per_gpu=-1``) for a
-no-constraint reference. All EQTransformer lean **fp16** variants (with or
-without ``torch.compile``) are driver-skipped. CPU trials can trim dtypes via
-``cpu_backends_override`` (omit or leave empty for a full sweep including
-FP16 on CPU).
+no-constraint reference. EQTransformer lean **fp16** (no ``torch.compile``) is
+driver-skipped. Optional ``model_labels`` on a backend entry restricts that
+backend to matching ``models[].label`` values (e.g. FP16+compile for PhaseNet
+only). CPU trials can trim dtypes via ``cpu_backends_override`` (omit or leave
+empty for a full sweep including FP16 on CPU).
 
 Rows include **process RAM**, **PyTorch VRAM**, and when NVML is available the
 same ``nvml_*`` fields as :mod:`rapid.matrix`.
@@ -150,14 +153,31 @@ class SeisBenchMatrixConfig:
 
 CellKey = Tuple[Any, ...]
 
+# Keys on a backend dict that are matrix driver metadata only (not passed to LeanPyTorch or stored in backend_extra).
+_BACKEND_CFG_META_KEYS = frozenset({"name", "dtype", "device", "model_labels"})
 
-def _backend_extra_sig(backend_cfg: Dict[str, Any]) -> str:
-    d = {
+
+def _backend_cfg_extra(backend_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
         k: v
         for k, v in (backend_cfg or {}).items()
-        if k not in ("name", "dtype", "device")
+        if k not in _BACKEND_CFG_META_KEYS
     }
-    return json.dumps(d, sort_keys=True, default=str)
+
+
+def _backend_applies_to_label(backend_cfg: Dict[str, Any], label: str) -> bool:
+    allowed = backend_cfg.get("model_labels")
+    if allowed is None:
+        return True
+    if isinstance(allowed, (list, tuple)):
+        return label in allowed
+    return str(label) == str(allowed)
+
+
+def _backend_extra_sig(backend_cfg: Dict[str, Any]) -> str:
+    return json.dumps(
+        _backend_cfg_extra(backend_cfg), sort_keys=True, default=str
+    )
 
 
 def _trace_slot(row: Dict[str, Any]) -> Any:
@@ -1084,13 +1104,19 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                         for bs in bss:
                                             fp32_ref = None
                                             for backend_cfg in lean_cfgs_dev:
-                                                dtype = backend_cfg.get("dtype", "fp32")
-                                                compile_flag = bool(backend_cfg.get("compile"))
-                                                extra = {
-                                                    k: v
-                                                    for k, v in backend_cfg.items()
-                                                    if k not in ("name", "dtype", "device")
-                                                }
+                                                if not _backend_applies_to_label(
+                                                    backend_cfg, label
+                                                ):
+                                                    continue
+                                                dtype = backend_cfg.get(
+                                                    "dtype", "fp32"
+                                                )
+                                                compile_flag = bool(
+                                                    backend_cfg.get("compile")
+                                                )
+                                                extra = _backend_cfg_extra(
+                                                    backend_cfg
+                                                )
                                                 if parent == "EQTransformer" and dtype == "fp16":
                                                     key_s = _row_key({
                                                         "runner": "lean_pytorch",
@@ -1459,17 +1485,13 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                     for bs in bss_d:
                                         fp32_ref_d: Optional[Any] = None
                                         for backend_cfg in lean_dual_cfgs:
+                                            if not _backend_applies_to_label(
+                                                backend_cfg, label
+                                            ):
+                                                continue
                                             dtype = backend_cfg.get("dtype", "fp32")
-                                            extra = {
-                                                k: v
-                                                for k, v in backend_cfg.items()
-                                                if k not in ("name", "dtype", "device")
-                                            }
-                                            bk_kw = {
-                                                k: v
-                                                for k, v in backend_cfg.items()
-                                                if k not in ("name", "dtype", "device")
-                                            } or None
+                                            extra = _backend_cfg_extra(backend_cfg)
+                                            bk_kw = extra or None
 
                                             compile_dual = bool(backend_cfg.get("compile"))
                                             if compile_dual:

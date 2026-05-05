@@ -35,10 +35,6 @@
     },
     {
       "name": "lean_pytorch",
-      "dtype": "fp32"
-    },
-    {
-      "name": "lean_pytorch",
       "dtype": "fp16"
     },
     {
@@ -47,8 +43,12 @@
     },
     {
       "name": "lean_pytorch",
-      "dtype": "fp32",
-      "compile": true
+      "dtype": "fp16",
+      "compile": true,
+      "model_labels": [
+        "PhaseNet",
+        "PhaseNetLight"
+      ]
     },
     {
       "name": "lean_pytorch",
