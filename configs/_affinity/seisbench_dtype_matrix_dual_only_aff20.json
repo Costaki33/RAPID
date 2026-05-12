@@ -53,7 +53,11 @@
     {
       "name": "lean_pytorch",
       "dtype": "bf16",
-      "compile": true
+      "compile": true,
+      "model_labels": [
+        "PhaseNet",
+        "PhaseNetLight"
+      ]
     }
   ],
   "devices": [

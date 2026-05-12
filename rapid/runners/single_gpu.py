@@ -7,11 +7,13 @@ raw predictions (for quality comparison).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import obspy
+import torch
 
 from ..backends.base import InferenceBackend
 from ..data import (
@@ -38,6 +40,8 @@ class RunResult:
     annotations_stream: Any = None
     station_ids: List[str] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
+    forward_only_s: Optional[float] = None
+    forward_calls: Optional[int] = None
 
     @property
     def total_s(self) -> float:
@@ -49,6 +53,53 @@ class RunResult:
         if t <= 0:
             return float("nan")
         return self.n_stations / t
+
+
+class _ForwardHookTimer:
+    """Forward hook that sums wall time spent inside ``module.forward()``.
+
+    Mirrors what the dedicated profiling script does so the matrix's
+    ``forward_only_s`` numbers are apples-to-apples with any standalone
+    benchmark: it synchronises CUDA before and after each forward call and
+    accumulates the elapsed time across calls.
+    """
+
+    def __init__(self, module: Optional[torch.nn.Module], device: str):
+        self.module = module
+        self.device = device
+        self.use_cuda = device.startswith("cuda") and torch.cuda.is_available()
+        self.total_s: float = 0.0
+        self.n_calls: int = 0
+        self._t0: Optional[float] = None
+        self._pre = None
+        self._post = None
+
+    def _on_pre(self, module, inputs):
+        if self.use_cuda:
+            torch.cuda.synchronize(self.device)
+        self._t0 = time.perf_counter()
+
+    def _on_post(self, module, inputs, output):
+        if self.use_cuda:
+            torch.cuda.synchronize(self.device)
+        if self._t0 is not None:
+            self.total_s += time.perf_counter() - self._t0
+            self.n_calls += 1
+            self._t0 = None
+
+    def __enter__(self):
+        self.total_s = 0.0
+        self.n_calls = 0
+        if self.module is not None:
+            self._pre = self.module.register_forward_pre_hook(self._on_pre)
+            self._post = self.module.register_forward_hook(self._on_post)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._pre is not None:
+            self._pre.remove()
+        if self._post is not None:
+            self._post.remove()
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +127,12 @@ def run_baseline_single(
         else:
             merged = streams[0][1] if streams else obspy.Stream()
 
-    with t.stage("annotate_end_to_end"):
-        annotations = backend.annotate_stream(merged, extra_kwargs=annotate_kwargs)
+    fwd_module = getattr(backend, "_model", None)
+    with _ForwardHookTimer(fwd_module, backend.device) as fh:
+        with t.stage("annotate_end_to_end"):
+            annotations = backend.annotate_stream(merged, extra_kwargs=annotate_kwargs)
+        fwd_only = fh.total_s
+        fwd_calls = fh.n_calls
 
     return RunResult(
         backend_name=backend.name,
@@ -91,6 +146,8 @@ def run_baseline_single(
         annotations_stream=annotations,
         station_ids=[s for s, _ in streams],
         extra={"merged_stream_len": len(merged)},
+        forward_only_s=float(fwd_only),
+        forward_calls=int(fwd_calls),
     )
 
 
@@ -152,8 +209,19 @@ def run_lean_single(
             backend.infer_batch(dummy)
 
     # ---- 4) Forward
-    with t.stage("forward"):
-        preds = backend.infer_chunked(mb.windows, batch_size=batch_size)
+    # NOTE: do **not** use `a or b` here. ``backend._fwd_model`` is a
+    # ``torch._dynamo.OptimizedModule`` when ``torch.compile`` is active, and
+    # truthiness checks on that object call ``__len__`` on the wrapped module,
+    # which raises ``TypeError`` for nn.Modules like PhaseNet. Use explicit
+    # ``is None`` checks to pick the underlying nn.Module to hook.
+    fwd_module = getattr(backend, "_fwd_model", None)
+    if fwd_module is None:
+        fwd_module = getattr(backend, "_model", None)
+    with _ForwardHookTimer(fwd_module, backend.device) as fh:
+        with t.stage("forward"):
+            preds = backend.infer_chunked(mb.windows, batch_size=batch_size)
+        fwd_only = fh.total_s
+        fwd_calls = fh.n_calls
 
     return RunResult(
         backend_name=backend.name,
@@ -167,6 +235,8 @@ def run_lean_single(
         predictions=preds,
         station_ids=[s for s, _ in arrays],
         extra={"overlap_samples": overlap_samples},
+        forward_only_s=float(fwd_only),
+        forward_calls=int(fwd_calls),
     )
 
 

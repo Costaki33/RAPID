@@ -82,7 +82,17 @@ from rapid.runners.dual_gpu_threaded import (
     run_baseline_two_gpu_even_halves,
     run_lean_two_gpu_even_halves,
 )
+from rapid.runners.dual_gpu_process import (
+    DualGPUProcessResult,
+    run_dual_gpu_process,
+)
 from rapid.runners.single_gpu import run_baseline_single, run_lean_single
+from rapid.data import (
+    WindowSpec,
+    build_megabatch,
+    preprocess_for_model,
+    stream_to_3c_array,
+)
 
 LOG = logging.getLogger("rapid.seisbench_matrix")
 
@@ -125,6 +135,12 @@ class SeisBenchMatrixConfig:
     run_single_gpu: bool = True
     dual_gpu: bool = False
     dual_gpu_serial: bool = True
+    # When True, dual-GPU lean rows with ``compile=true`` are routed through
+    # :func:`rapid.runners.dual_gpu_process.run_dual_gpu_process` (separate
+    # Python interpreters + CUDA contexts via ``torch.multiprocessing``) so
+    # ``torch.compile``'s CUDA-graph capture does not corrupt cross-thread
+    # state. When False (legacy behaviour) those cells are skipped.
+    dual_gpu_use_process_runner_for_compile: bool = False
     # CPU-affinity sweep: each value N pins the **whole driver process** to N
     # cores via ``os.sched_setaffinity`` while the trial runs (then restores
     # the original affinity). Recorded on dual-GPU lean rows as
@@ -185,6 +201,60 @@ def _trace_slot(row: Dict[str, Any]) -> Any:
     if isinstance(trs, (list, tuple)) and len(trs) > 0:
         return tuple(sorted(int(x) for x in trs))
     return row.get("sb_trace_row")
+
+
+@contextlib.contextmanager
+def _torch_thread_cap(n_cpus: Optional[int]) -> Iterator[Optional[Tuple[int, int]]]:
+    """Cap ``torch.set_num_threads`` / ``set_num_interop_threads`` for the duration.
+
+    This pairs with :func:`_pin_cpu_affinity`: pinning constrains the OS scheduler,
+    but PyTorch's intra-op OpenMP pool size is set independently and defaults to
+    the number of physical cores at import time. Capping it here keeps PyTorch's
+    own CPU threads aligned with the affinity budget for preprocessing work.
+
+    This does **not** affect MKL / OpenBLAS / NumPy thread pools, which are sized
+    at process start from ``OMP_NUM_THREADS`` / ``MKL_NUM_THREADS`` env vars. For
+    full BLAS-aware affinity control, launch the matrix via
+    :mod:`scripts.run_all_affinity` (which sets those env vars before Python
+    imports) instead of running the matrix entry point directly.
+    """
+    if n_cpus is None or int(n_cpus) <= 0:
+        yield None
+        return
+    n = int(n_cpus)
+    try:
+        import torch  # local import to avoid cost on non-pinned paths
+    except Exception:
+        yield None
+        return
+    try:
+        prev_intra = int(torch.get_num_threads())
+    except Exception:
+        prev_intra = -1
+    try:
+        prev_inter = int(torch.get_num_interop_threads())
+    except Exception:
+        prev_inter = -1
+    try:
+        torch.set_num_threads(n)
+    except Exception as exc:
+        LOG.warning("torch.set_num_threads(%d) failed: %s", n, exc)
+    try:
+        # set_num_interop_threads can only be called before any parallel work
+        # has been dispatched. Skip silently if already locked in.
+        torch.set_num_interop_threads(max(1, n))
+    except RuntimeError:
+        pass
+    except Exception as exc:
+        LOG.debug("torch.set_num_interop_threads(%d) failed: %s", n, exc)
+    try:
+        yield (prev_intra, prev_inter)
+    finally:
+        if prev_intra > 0:
+            try:
+                torch.set_num_threads(prev_intra)
+            except Exception:
+                pass
 
 
 @contextlib.contextmanager
@@ -266,6 +336,7 @@ def _is_dual_ray_row(device: Any, runner: Any) -> bool:
         "baseline_annotate_dual",
         "lean_pytorch_dual_serial",
         "lean_pytorch_dual_pipelined",
+        "lean_pytorch_dual_process",
     )
 
 
@@ -308,7 +379,9 @@ def _row_key(row: Dict[str, Any]) -> CellKey:
     bs_k = _batch_size_key_cell(row)
     ov = int(row.get("overlap_samples") or 0)
     ns_win = int(row.get("n_samples") or -1)
-    return base + (ns_win, ns, bs_k, ov, rep)
+    pin_raw = row.get("n_cpus_pinned")
+    pin = int(pin_raw) if pin_raw is not None else -1
+    return base + (ns_win, ns, bs_k, ov, pin, rep)
 
 
 def _dup_streams(
@@ -316,10 +389,29 @@ def _dup_streams(
     n: int,
     trace_row: int,
 ) -> List[Tuple[str, obspy.Stream]]:
-    """N independent copies of the same trace (different station ids)."""
+    """N independent copies of the same trace with unique trace-level IDs.
+
+    Each duplicate stream is rewritten so that the inner ObsPy traces have a
+    unique ``network.station`` code. Without this rewrite, ``stream.merge(-1)``
+    inside ``model.annotate(stream)`` collapses identical-id duplicates down to
+    a single station's worth of work, which makes annotate() appear to ignore
+    ``n_stations`` while the lean path honestly processes every window.
+    """
     out: List[Tuple[str, obspy.Stream]] = []
     for i in range(int(n)):
-        st_copy = obspy.Stream(traces=[tr.copy() for tr in raw_stream])
+        traces = []
+        # Encode the duplicate index into the station code. Station codes can
+        # be up to 5 alphanumeric characters; we use a zero-padded base-36-ish
+        # encoding to stay safely under that limit for n up to 46655 (36**3).
+        # Practically: i in [0, 580) fits in 3 chars.
+        sta_code = f"S{int(i):04d}"[:5]
+        for tr in raw_stream:
+            tc = tr.copy()
+            tc.stats.network = "RP"
+            tc.stats.station = sta_code
+            tc.stats.location = ""
+            traces.append(tc)
+        st_copy = obspy.Stream(traces=traces)
         out.append((f"sb{trace_row}#{i}", st_copy))
     return out
 
@@ -904,6 +996,23 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                 })
 
             if cfg.run_single_gpu:
+                # Affinity sweep for single-GPU baseline + lean cells. Each
+                # listed value pins the driver process to that many cores via
+                # ``os.sched_setaffinity`` and caps PyTorch's intra-op pool via
+                # ``torch.set_num_threads`` for the duration of one trial. An
+                # empty ``cpus`` list keeps the legacy unpinned behaviour.
+                #
+                # NOTE: MKL / OpenBLAS / NumPy thread pools are sized from
+                # ``OMP_NUM_THREADS`` / ``MKL_NUM_THREADS`` at process startup
+                # and cannot be resized per-trial from Python. For BLAS-aware
+                # affinity control launch the matrix via
+                # ``scripts/run_all_affinity.py``, which wraps each affinity
+                # value in its own ``taskset`` subprocess with the appropriate
+                # env vars set before Python imports.
+                single_gpu_cpus_sweep: List[Optional[int]] = (
+                    [int(x) for x in cfg.cpus] if cfg.cpus else [None]
+                )
+
                 for device in cfg.devices:
                     if "+" in device:
                         continue
@@ -950,6 +1059,7 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
     
                                 for repeat in range(cfg.repeats):
                                     if cfg.include_baseline:
+                                      for sg_n_cpus in single_gpu_cpus_sweep:
                                         key_b = _row_key({
                                             "runner": "baseline_annotate",
                                             "sb_dataset": dkey,
@@ -963,6 +1073,7 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                             "n_samples": ns_row,
                                             "batch_size": -1,
                                             "overlap_samples": 0,
+                                            "n_cpus_pinned": sg_n_cpus if sg_n_cpus and sg_n_cpus > 0 else None,
                                             "repeat": repeat,
                                         })
                                         if key_b not in completed:
@@ -993,13 +1104,16 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                                     if device.startswith("cuda")
                                                     else None
                                                 )
+                                                bl_pinned_ids: Optional[List[int]] = None
                                                 try:
-                                                    with t.stage("annotate_end_to_end"):
-                                                        res_bl = run_baseline_single(
-                                                            baseline,
-                                                            streams_n,
-                                                            merge_into_one_stream=True,
-                                                        )
+                                                    _pin_arg_b = sg_n_cpus if (sg_n_cpus and sg_n_cpus > 0) else None
+                                                    with _pin_cpu_affinity(_pin_arg_b) as bl_pinned_ids, _torch_thread_cap(_pin_arg_b):
+                                                        with t.stage("annotate_end_to_end"):
+                                                            res_bl = run_baseline_single(
+                                                                baseline,
+                                                                streams_n,
+                                                                merge_into_one_stream=True,
+                                                            )
                                                 finally:
                                                     rss_stats_b = rss_b.stop()
                                                     if gpuw_b is not None:
@@ -1070,6 +1184,18 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                                     "repeat": repeat,
                                                     "wall_time_s": wall,
                                                     "stage_times_s": stages,
+                                                    "forward_only_s": res_bl.forward_only_s,
+                                                    "forward_calls": res_bl.forward_calls,
+                                                    "n_cpus_pinned": (
+                                                        int(sg_n_cpus)
+                                                        if sg_n_cpus and sg_n_cpus > 0
+                                                        else None
+                                                    ),
+                                                    "cpu_affinity_set": (
+                                                        list(bl_pinned_ids)
+                                                        if bl_pinned_ids is not None
+                                                        else None
+                                                    ),
                                                     "pick_quality": pq_b,
                                                     "station_synthesis": "repeated_catalog_trace",
                                                     "pick_quality_trace": (
@@ -1156,163 +1282,180 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                                         completed.add(key_s)
                                                     continue
     
-                                                key_l = _row_key({
-                                                    "runner": "lean_pytorch",
-                                                    "sb_dataset": dkey,
-                                                    "sb_trace_row": trace_row,
-                                                    "model_label": label,
-                                                    "backend": "lean_pytorch",
-                                                    "dtype": dtype,
-                                                    "backend_extra": extra,
-                                                    "device": device,
-                                                    "n_stations": n_st,
-                                                    "n_samples": ns_row,
-                                                    "batch_size": int(bs),
-                                                    "overlap_samples": int(overlap),
-                                                    "repeat": repeat,
-                                                })
-                                                if key_l in completed:
-                                                    continue
-    
-                                                try:
-                                                    bc_k = (dtype, compile_flag)
-                                                    if bc_k not in lean_cache:
-                                                        b = LeanPyTorchBackend(
-                                                            parent,
-                                                            child,
-                                                            device=device,
-                                                            dtype=dtype,
-                                                            compile=compile_flag,
-                                                        )
-                                                        b.load()
-                                                        lean_cache[bc_k] = b
-                                                    be = lean_cache[bc_k]
-    
-                                                    _gpu_mem_reset(device)
-                                                    rss_l = RSSPoller()
-                                                    rss_l.start()
-                                                    gpuw_l: Optional[GPUWatcher] = None
-                                                    tel_stats_l: Any = None
-                                                    idxs_l = _cuda_indices_for_device(device)
-                                                    if idxs_l:
-                                                        gpuw_l = GPUWatcher(
-                                                            device_indices=idxs_l,
-                                                            interval_s=0.2,
-                                                        )
-                                                        gpuw_l.start()
-                                                    try:
-                                                        res_ln = run_lean_single(
-                                                            be,
-                                                            streams_n,
-                                                            batch_size=max(1, int(bs)),
-                                                            overlap_samples=int(overlap),
-                                                            warmup_iters=cfg.warmup_iters,
-                                                        )
-                                                    finally:
-                                                        rss_stats_l = rss_l.stop()
-                                                        if gpuw_l is not None:
-                                                            tel_stats_l = gpuw_l.stop()
-                                                    stages = dict(res_ln.stage_times)
-                                                    wall = float(res_ln.total_s)
-                                                    peak = _gpu_mem_peak(device)
-                                                    pred = res_ln.predictions
-                                                    pq: Optional[Dict[str, Any]] = None
-                                                    if (
-                                                        pred is not None
-                                                        and pred.shape[0] > 0
-                                                    ):
-                                                        pred0 = pred[0:1]
-                                                        ref_for_pick = None
-                                                        if dtype == "fp32":
-                                                            fp32_ref = pred0
-                                                        else:
-                                                            ref_for_pick = fp32_ref
-                                                        pq = _pick_quality(
-                                                            pred0,
-                                                            p_idx=p_i,
-                                                            s_idx=s_i,
-                                                            p_win=p_win,
-                                                            s_win=s_win,
-                                                            prob_threshold=cfg.prob_threshold,
-                                                            ref_fp32=ref_for_pick,
-                                                        )
-    
-                                                    mem_l = _memory_row_fields(
-                                                        rss_stats_l,
-                                                        tel_stats_l,
-                                                        peak_gpu_torch=peak,
-                                                        include_torch_all_devices=bool(idxs_l),
-                                                    )
-                                                    row_l = {
-                                                        "kind": "seisbench",
-                                                        "data_source": "seisbench",
+                                                for sg_n_cpus_l in single_gpu_cpus_sweep:
+                                                    key_l = _row_key({
                                                         "runner": "lean_pytorch",
-                                                        "schema_version": SCHEMA_VERSION,
-                                                        "trial_uid": _trial_uid(key_l),
+                                                        "sb_dataset": dkey,
+                                                        "sb_trace_row": trace_row,
+                                                        "model_label": label,
                                                         "backend": "lean_pytorch",
                                                         "dtype": dtype,
                                                         "backend_extra": extra,
-                                                        "model_parent": parent,
-                                                        "model_child": child,
-                                                        "model_label": label,
                                                         "device": device,
-                                                        "sb_dataset": dkey,
-                                                        "sb_trace_row": trace_row,
-                                                        "catalog_p_column": p_col,
-                                                        "catalog_s_column": s_col,
-                                                        "p_catalog_in_window": p_win,
-                                                        "s_catalog_in_window": s_win,
-                                                        "dataset_dir": None,
-                                                        "dataset_label": dkey,
                                                         "n_stations": n_st,
-                                                        "n_windows": int(res_ln.n_windows),
                                                         "n_samples": ns_row,
-                                                        "in_samples": in_samples,
                                                         "batch_size": int(bs),
                                                         "overlap_samples": int(overlap),
+                                                        "n_cpus_pinned": sg_n_cpus_l if sg_n_cpus_l and sg_n_cpus_l > 0 else None,
                                                         "repeat": repeat,
-                                                        "wall_time_s": wall,
-                                                        "stage_times_s": stages,
-                                                        "pick_quality": pq,
-                                                        "station_synthesis": "repeated_catalog_trace",
-                                                        "pick_quality_station_index": 0,
-                                                        "timestamp_s": time.time(),
-                                                        **mem_l,
-                                                    }
-                                                    _append_jsonl(out_path, row_l)
-                                                    completed.add(key_l)
-                                                except BackendError as exc:
-                                                    row_e = {
-                                                        "kind": "error",
-                                                        "data_source": "seisbench",
-                                                        "runner": "lean_pytorch",
-                                                        "schema_version": SCHEMA_VERSION,
-                                                        "trial_uid": _trial_uid(key_l),
-                                                        "model_label": label,
-                                                        "sb_dataset": dkey,
-                                                        "sb_trace_row": trace_row,
-                                                        "backend": "lean_pytorch",
-                                                        "dtype": dtype,
-                                                        "device": device,
-                                                        "repeat": repeat,
-                                                        "error": str(exc),
-                                                        "timestamp_s": time.time(),
-                                                    }
-                                                    _append_jsonl(out_path, row_e)
-                                                except Exception:
-                                                    row_e = {
-                                                        "kind": "error",
-                                                        "data_source": "seisbench",
-                                                        "runner": "lean_pytorch",
-                                                        "schema_version": SCHEMA_VERSION,
-                                                        "trial_uid": _trial_uid(key_l),
-                                                        "model_label": label,
-                                                        "sb_dataset": dkey,
-                                                        "sb_trace_row": trace_row,
-                                                        "error": traceback.format_exc(),
-                                                        "timestamp_s": time.time(),
-                                                    }
-                                                    _append_jsonl(out_path, row_e)
+                                                    })
+                                                    if key_l in completed:
+                                                        continue
+
+                                                    try:
+                                                        bc_k = (dtype, compile_flag)
+                                                        if bc_k not in lean_cache:
+                                                            b = LeanPyTorchBackend(
+                                                                parent,
+                                                                child,
+                                                                device=device,
+                                                                dtype=dtype,
+                                                                compile=compile_flag,
+                                                            )
+                                                            b.load()
+                                                            lean_cache[bc_k] = b
+                                                        be = lean_cache[bc_k]
+
+                                                        _gpu_mem_reset(device)
+                                                        rss_l = RSSPoller()
+                                                        rss_l.start()
+                                                        gpuw_l: Optional[GPUWatcher] = None
+                                                        tel_stats_l: Any = None
+                                                        idxs_l = _cuda_indices_for_device(device)
+                                                        if idxs_l:
+                                                            gpuw_l = GPUWatcher(
+                                                                device_indices=idxs_l,
+                                                                interval_s=0.2,
+                                                            )
+                                                            gpuw_l.start()
+                                                        ln_pinned_ids: Optional[List[int]] = None
+                                                        try:
+                                                            _pin_arg_l = sg_n_cpus_l if (sg_n_cpus_l and sg_n_cpus_l > 0) else None
+                                                            with _pin_cpu_affinity(_pin_arg_l) as ln_pinned_ids, _torch_thread_cap(_pin_arg_l):
+                                                                res_ln = run_lean_single(
+                                                                    be,
+                                                                    streams_n,
+                                                                    batch_size=max(1, int(bs)),
+                                                                    overlap_samples=int(overlap),
+                                                                    warmup_iters=cfg.warmup_iters,
+                                                                )
+                                                        finally:
+                                                            rss_stats_l = rss_l.stop()
+                                                            if gpuw_l is not None:
+                                                                tel_stats_l = gpuw_l.stop()
+                                                        stages = dict(res_ln.stage_times)
+                                                        wall = float(res_ln.total_s)
+                                                        peak = _gpu_mem_peak(device)
+                                                        pred = res_ln.predictions
+                                                        pq: Optional[Dict[str, Any]] = None
+                                                        if (
+                                                            pred is not None
+                                                            and pred.shape[0] > 0
+                                                        ):
+                                                            pred0 = pred[0:1]
+                                                            ref_for_pick = None
+                                                            if dtype == "fp32":
+                                                                fp32_ref = pred0
+                                                            else:
+                                                                ref_for_pick = fp32_ref
+                                                            pq = _pick_quality(
+                                                                pred0,
+                                                                p_idx=p_i,
+                                                                s_idx=s_i,
+                                                                p_win=p_win,
+                                                                s_win=s_win,
+                                                                prob_threshold=cfg.prob_threshold,
+                                                                ref_fp32=ref_for_pick,
+                                                            )
+    
+                                                        mem_l = _memory_row_fields(
+                                                            rss_stats_l,
+                                                            tel_stats_l,
+                                                            peak_gpu_torch=peak,
+                                                            include_torch_all_devices=bool(idxs_l),
+                                                        )
+                                                        row_l = {
+                                                            "kind": "seisbench",
+                                                            "data_source": "seisbench",
+                                                            "runner": "lean_pytorch",
+                                                            "schema_version": SCHEMA_VERSION,
+                                                            "trial_uid": _trial_uid(key_l),
+                                                            "backend": "lean_pytorch",
+                                                            "dtype": dtype,
+                                                            "backend_extra": extra,
+                                                            "model_parent": parent,
+                                                            "model_child": child,
+                                                            "model_label": label,
+                                                            "device": device,
+                                                            "sb_dataset": dkey,
+                                                            "sb_trace_row": trace_row,
+                                                            "catalog_p_column": p_col,
+                                                            "catalog_s_column": s_col,
+                                                            "p_catalog_in_window": p_win,
+                                                            "s_catalog_in_window": s_win,
+                                                            "dataset_dir": None,
+                                                            "dataset_label": dkey,
+                                                            "n_stations": n_st,
+                                                            "n_windows": int(res_ln.n_windows),
+                                                            "n_samples": ns_row,
+                                                            "in_samples": in_samples,
+                                                            "batch_size": int(bs),
+                                                            "overlap_samples": int(overlap),
+                                                            "repeat": repeat,
+                                                            "wall_time_s": wall,
+                                                            "stage_times_s": stages,
+                                                            "forward_only_s": res_ln.forward_only_s,
+                                                            "forward_calls": res_ln.forward_calls,
+                                                            "n_cpus_pinned": (
+                                                                int(sg_n_cpus_l)
+                                                                if sg_n_cpus_l and sg_n_cpus_l > 0
+                                                                else None
+                                                            ),
+                                                            "cpu_affinity_set": (
+                                                                list(ln_pinned_ids)
+                                                                if ln_pinned_ids is not None
+                                                                else None
+                                                            ),
+                                                            "pick_quality": pq,
+                                                            "station_synthesis": "repeated_catalog_trace",
+                                                            "pick_quality_station_index": 0,
+                                                            "timestamp_s": time.time(),
+                                                            **mem_l,
+                                                        }
+                                                        _append_jsonl(out_path, row_l)
+                                                        completed.add(key_l)
+                                                    except BackendError as exc:
+                                                        row_e = {
+                                                            "kind": "error",
+                                                            "data_source": "seisbench",
+                                                            "runner": "lean_pytorch",
+                                                            "schema_version": SCHEMA_VERSION,
+                                                            "trial_uid": _trial_uid(key_l),
+                                                            "model_label": label,
+                                                            "sb_dataset": dkey,
+                                                            "sb_trace_row": trace_row,
+                                                            "backend": "lean_pytorch",
+                                                            "dtype": dtype,
+                                                            "device": device,
+                                                            "repeat": repeat,
+                                                            "error": str(exc),
+                                                            "timestamp_s": time.time(),
+                                                        }
+                                                        _append_jsonl(out_path, row_e)
+                                                    except Exception:
+                                                        row_e = {
+                                                            "kind": "error",
+                                                            "data_source": "seisbench",
+                                                            "runner": "lean_pytorch",
+                                                            "schema_version": SCHEMA_VERSION,
+                                                            "trial_uid": _trial_uid(key_l),
+                                                            "model_label": label,
+                                                            "sb_dataset": dkey,
+                                                            "sb_trace_row": trace_row,
+                                                            "error": traceback.format_exc(),
+                                                            "timestamp_s": time.time(),
+                                                        }
+                                                        _append_jsonl(out_path, row_e)
                     finally:
                         _close_dev_backends()
 
@@ -1495,6 +1638,162 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
 
                                             compile_dual = bool(backend_cfg.get("compile"))
                                             if compile_dual:
+                                                # Route compile + dual-GPU through the process-based runner
+                                                # if the operator asked for it. Each GPU gets its own Python
+                                                # interpreter + CUDA context (via torch.multiprocessing.spawn),
+                                                # which is the only configuration where torch.compile's CUDA
+                                                # graphs do not corrupt cross-thread state.
+                                                use_proc_dc = bool(
+                                                    getattr(cfg, "dual_gpu_use_process_runner_for_compile", False)
+                                                )
+                                                if use_proc_dc:
+                                                    key_dpp = _row_key({
+                                                        "runner": "lean_pytorch_dual_process",
+                                                        "sb_dataset": dkey,
+                                                        "sb_trace_row": trace_row,
+                                                        "model_label": label,
+                                                        "backend": "lean_pytorch",
+                                                        "dtype": dtype,
+                                                        "backend_extra": extra,
+                                                        "device": dual_dev,
+                                                        "n_stations": n_st,
+                                                        "n_samples": ns_row,
+                                                        "n_cpu_workers_per_gpu": -2,
+                                                        "batch_size": int(bs),
+                                                        "overlap_samples": int(overlap),
+                                                        "repeat": repeat,
+                                                    })
+                                                    if key_dpp not in completed:
+                                                        try:
+                                                            _baseline_obj = locals().get("baseline", None)
+                                                            sb_model_dp = (
+                                                                _baseline_obj._model
+                                                                if (_baseline_obj is not None and getattr(_baseline_obj, "_model", None) is not None)
+                                                                else getattr(sbm, parent).from_pretrained(child)
+                                                            )
+                                                            argdict_dp = {
+                                                                "sampling_rate": getattr(
+                                                                    sb_model_dp, "sampling_rate", None
+                                                                )
+                                                            }
+                                                            t_prep_dp0 = time.perf_counter()
+                                                            arrays_dp: List[Tuple[str, np.ndarray]] = []
+                                                            for sta_id, st in streams_n:
+                                                                pre = preprocess_for_model(
+                                                                    sb_model_dp, st, argdict=argdict_dp
+                                                                )
+                                                                arr = stream_to_3c_array(
+                                                                    pre,
+                                                                    component_order=getattr(
+                                                                        sb_model_dp, "component_order", None
+                                                                    ) or "ZNE",
+                                                                )
+                                                                if arr is not None:
+                                                                    arrays_dp.append((sta_id, arr))
+                                                            spec_dp = WindowSpec(
+                                                                in_samples=in_samples,
+                                                                overlap_samples=int(overlap),
+                                                            )
+                                                            mb_dp = build_megabatch(arrays_dp, spec_dp)
+                                                            prep_s_dp = time.perf_counter() - t_prep_dp0
+
+                                                            rss_dp = RSSPoller()
+                                                            rss_dp.start()
+                                                            gw_dp = GPUWatcher(
+                                                                device_indices=[0, 1], interval_s=0.2
+                                                            )
+                                                            gw_dp.start()
+                                                            try:
+                                                                r_dp = run_dual_gpu_process(
+                                                                    parent_model=parent,
+                                                                    child_model=child,
+                                                                    dtype=dtype,
+                                                                    megabatch=mb_dp,
+                                                                    batch_size=max(1, int(bs)),
+                                                                    compile_model=True,
+                                                                    devices=("cuda:0", "cuda:1"),
+                                                                    warmup_iters=cfg.warmup_iters,
+                                                                )
+                                                            finally:
+                                                                rss_stats_dp = rss_dp.stop()
+                                                                tel_stats_dp = gw_dp.stop()
+                                                            mem_dp = _memory_row_fields(
+                                                                rss_stats_dp,
+                                                                tel_stats_dp,
+                                                                peak_gpu_torch=None,
+                                                                include_torch_all_devices=True,
+                                                            )
+                                                            row_dp = {
+                                                                "kind": "seisbench",
+                                                                "data_source": "seisbench",
+                                                                "runner": "lean_pytorch_dual_process",
+                                                                "schema_version": SCHEMA_VERSION,
+                                                                "trial_uid": _trial_uid(key_dpp),
+                                                                "backend": "lean_pytorch",
+                                                                "dtype": dtype,
+                                                                "backend_extra": extra,
+                                                                "model_parent": parent,
+                                                                "model_child": child,
+                                                                "model_label": label,
+                                                                "device": dual_dev,
+                                                                "sb_dataset": dkey,
+                                                                "sb_trace_row": trace_row,
+                                                                "catalog_p_column": p_col,
+                                                                "catalog_s_column": s_col,
+                                                                "p_catalog_in_window": p_win,
+                                                                "s_catalog_in_window": s_win,
+                                                                "dataset_dir": None,
+                                                                "dataset_label": dkey,
+                                                                "n_stations": n_st,
+                                                                "n_samples": ns_row,
+                                                                "n_cpu_workers_per_gpu": -2,
+                                                                "n_windows": int(r_dp.n_windows),
+                                                                "in_samples": in_samples,
+                                                                "batch_size": int(bs),
+                                                                "overlap_samples": int(overlap),
+                                                                "repeat": repeat,
+                                                                "wall_time_s": float(r_dp.wall_time_s),
+                                                                "end_to_end_wall_s": float(r_dp.wall_time_s),
+                                                                "stage_times_s": {
+                                                                    "driver_preprocess": float(prep_s_dp),
+                                                                    "gpu0_forward": float(r_dp.gpu0_time_s),
+                                                                    "gpu1_forward": float(r_dp.gpu1_time_s),
+                                                                },
+                                                                "forward_only_s": float(
+                                                                    max(r_dp.gpu0_time_s, r_dp.gpu1_time_s)
+                                                                ),
+                                                                "forward_calls": None,
+                                                                "pick_quality": None,
+                                                                "station_synthesis": "repeated_catalog_trace",
+                                                                "pick_quality_station_index": 0,
+                                                                "dual_gpu_station_split": "megabatch_halves_cuda0_cuda1",
+                                                                "timestamp_s": time.time(),
+                                                                **mem_dp,
+                                                            }
+                                                            _append_jsonl(out_path, row_dp)
+                                                            completed.add(key_dpp)
+                                                        except Exception as exc:
+                                                            _append_jsonl(
+                                                                out_path,
+                                                                {
+                                                                    "kind": "error",
+                                                                    "data_source": "seisbench",
+                                                                    "runner": "lean_pytorch_dual_process",
+                                                                    "schema_version": SCHEMA_VERSION,
+                                                                    "trial_uid": _trial_uid(key_dpp),
+                                                                    "model_label": label,
+                                                                    "sb_dataset": dkey,
+                                                                    "sb_trace_row": trace_row,
+                                                                    "backend": "lean_pytorch",
+                                                                    "dtype": dtype,
+                                                                    "device": dual_dev,
+                                                                    "repeat": repeat,
+                                                                    "error": f"{exc}\n{traceback.format_exc()}",
+                                                                    "timestamp_s": time.time(),
+                                                                },
+                                                            )
+                                                    continue
+
                                                 want_serial_dc = bool(cfg.dual_gpu_serial)
                                                 if want_serial_dc:
                                                     key_dcs = _row_key({

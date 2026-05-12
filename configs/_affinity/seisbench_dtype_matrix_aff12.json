@@ -1,11 +1,11 @@
 {
-  "_comment": "LEAN SeisBench dtype matrix: GPU-first, smaller sweeps, ~O(10^5) rows vs 10^6+ for full grid. FP32 full-precision reference is baseline_annotate only (no lean_pytorch fp32). Lean sweep: FP16/BF16 + torch.compile (FP16+compile only where model_labels lists PhaseNet-style labels). EQT FP16 lean without compile is still skipped in the driver. For full sweeps see seisbench_dtype_matrix_full.json.",
+  "_comment": "LEAN SeisBench dtype matrix: GPU-first, smaller sweeps, ~O(10^5) rows vs 10^6+ for full grid. FP32 full-precision reference is baseline_annotate only (no lean_pytorch fp32). Lean sweep: FP16/BF16, plus torch.compile variants restricted to PhaseNet models via model_labels. EQT FP16 lean without compile is still skipped in the driver. For full sweeps see seisbench_dtype_matrix_full.json.",
   "_comment_devices": "Single GPU (cuda:0) avoids duplicating the whole grid on cuda:1. Add \"cuda:1\" if you need per-device deltas. CPU omitted here\u2014add \"cpu\" plus cpu_backends_override (short list) if you need CPU reference numbers without 6\u00d7 compile cost.",
   "seisbench_datasets": [
     "stead",
     "txed"
   ],
-  "traces_per_dataset": 100,
+  "traces_per_dataset": 25,
   "models": [
     {
       "parent": "PhaseNet",
@@ -53,7 +53,11 @@
     {
       "name": "lean_pytorch",
       "dtype": "bf16",
-      "compile": true
+      "compile": true,
+      "model_labels": [
+        "PhaseNet",
+        "PhaseNetLight"
+      ]
     }
   ],
   "devices": [
@@ -84,12 +88,15 @@
   "include_baseline": true,
   "prob_threshold": 0.3,
   "dual_gpu": true,
-  "dual_gpu_serial": true,
+  "dual_gpu_serial": false,
+  "_comment_dual_gpu_serial": "Misleading legacy name: this flag does NOT run GPUs sequentially. It only adds an extra unpinned-CPU trial whose label happens to be 'lean_pytorch_dual_serial'. The actual dual-GPU runner always runs both devices concurrently (threaded variant: max(shard0, shard1) wall time; process variant: same). Leave false to avoid duplicate-trial confusion.",
+  "dual_gpu_use_process_runner_for_compile": true,
+  "_comment_dual_gpu_use_process_runner_for_compile": "When true and a backend has compile=true, dual-GPU work routes through rapid.runners.dual_gpu_process (separate Python interpreters + CUDA contexts via torch.multiprocessing) instead of being driver-skipped. This is the only safe configuration for torch.compile across two GPUs: each worker process owns its own Inductor and CUDA-graph state, so there is no cross-thread context corruption. Lean dual-GPU cells without compile keep using the threaded runner.",
   "cpus": [
     12
   ],
-  "_comment_cpus": "Ignored unless dual_gpu is true. Short list for when you re-enable 2-GPU trials.",
-  "_comment_cpu_reference": "Example CPU spot-check: \"devices\": [\"cpu\", \"cuda:0\"], \"cpu_backends_override\": [{\"name\":\"lean_pytorch\",\"dtype\":\"fp32\"},{\"name\":\"lean_pytorch\",\"dtype\":\"fp16\"},{\"name\":\"lean_pytorch\",\"dtype\":\"bf16\"}]",
+  "_comment_cpus": "CPU-affinity sweep applied to the dual-GPU driver process. Ignored unless dual_gpu is true.",
+  "_comment_cpu_reference": "Example CPU spot-check: \"devices\": [\"cpu\", \"cuda:0\"], \"cpu_backends_override\": [{\"name\":\"lean_pytorch\",\"dtype\":\"fp16\"},{\"name\":\"lean_pytorch\",\"dtype\":\"bf16\"}] (FP32 via baseline_annotate on CPU when include_baseline is true).",
   "resume_include_jsonl": [],
   "_affinity_n_cpus": 12,
   "_affinity_source_config": "/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/RAPID/configs/seisbench_dtype_matrix.json"
