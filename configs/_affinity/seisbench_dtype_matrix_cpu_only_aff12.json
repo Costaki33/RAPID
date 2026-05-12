@@ -5,7 +5,7 @@
     "stead",
     "txed"
   ],
-  "traces_per_dataset": 100,
+  "traces_per_dataset": 25,
   "models": [
     {
       "parent": "PhaseNet",

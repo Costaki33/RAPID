@@ -2,7 +2,7 @@
   "_comment": "CPU-only phase: single-device sweep on device=cpu only. Existing successful rows in seisbench_matrix.jsonl are merged into the resume set (same cell keys) so CPU trials already written there are not re-run. Write to a dedicated output_jsonl (or your path) with resume=true.",
   "_comment_backends": "cpu_backends_override: FP16/BF16, plus compile variants for PhaseNet models only via model_labels. FP32 reference is baseline_annotate only.",
   "seisbench_datasets": ["stead", "txed"],
-  "traces_per_dataset": 100,
+  "traces_per_dataset": 25,
   "models": [
     { "parent": "PhaseNet", "child": "original", "label": "PhaseNet" },
     { "parent": "PhaseNetLight", "child": "stead", "label": "PhaseNetLight" },

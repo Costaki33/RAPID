@@ -137,13 +137,14 @@ def _run_one(
     log_dir: Path,
     tmp_dir: Path,
     dry_run: bool,
+    offset: int,
 ) -> int:
     if shutil.which("taskset") is None:
         print("[orchestrator] ERROR: taskset is not on PATH; cannot pin CPUs.")
         return 127
 
     tmp_cfg_path, out_jsonl = _build_temp_config(src_cfg_path, n_cpus, tmp_dir)
-    cpu_list = f"0-{n_cpus - 1}"
+    cpu_list = f"{offset}-{offset + n_cpus - 1}"
 
     cmd: List[str] = [
         "taskset",
@@ -240,6 +241,12 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--cpu-offset",
+        type=int,
+        default=0,
+        help="Offset to apply to the CPU list. Default: 0",
+    )
+    ap.add_argument(
         "--cpus",
         nargs="+",
         type=int,
@@ -300,6 +307,7 @@ def main() -> int:
         print(f"[orchestrator] ERROR: run_matrix.py not found at {run_matrix_script}")
         return 2
 
+    offset = args.cpu_offset
     src_cfg_paths: List[Path] = []
     for c in args.configs:
         p = _resolve_under_rapid(c)
@@ -330,6 +338,7 @@ def main() -> int:
                 log_dir=log_dir,
                 tmp_dir=tmp_dir,
                 dry_run=args.dry_run,
+                offset=offset,
             )
         except KeyboardInterrupt:
             print("\n[orchestrator] Interrupted by user. Stopping.")
