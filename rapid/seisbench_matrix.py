@@ -604,19 +604,30 @@ def _annotate_stream_to_window_pred(
     preprocessed_T: int,
     window_start: int,
     in_samples: int,
+    input_stream: Any = None,
 ) -> Optional[np.ndarray]:
     """Map SeisBench ``annotate()`` probability traces to ``(1, T_win, n_label)``.
 
-    ``annotate()`` can yield a different time length than
-    ``annotate_stream_pre`` (filter / reassembly). When lengths differ we
-    linearly resample sample indices from the preprocessed grid to the
-    probability grid so ``p_win`` / ``s_win`` stay comparable to the lean path.
+    ``annotate()`` can yield a different time length AND a **time offset** from
+    the input stream (SeisBench trims edges during filter / reassembly). We
+    account for both:
+
+    1. **Time offset**: annotation trace may start later than input stream
+       (e.g. 2.5s = 250 samples at 100 Hz for PhaseNet). We compute this from
+       ``input_stream[0].stats.starttime`` vs the annotation trace starttime.
+
+    2. **Length difference**: annotation length may differ from preprocessed_T.
+       After offset correction, we linearly resample if needed.
+
+    Without offset correction, ``onset_p`` from annotate would be systematically
+    early by the offset amount compared to the lean path.
     """
     try:
         labs = list(sb_model.labels)
     except Exception:
         return None
     cols: List[np.ndarray] = []
+    ann_starttime = None
     for lab in labs:
         suf = "_" + str(lab).upper()
         tr_found = None
@@ -634,6 +645,8 @@ def _annotate_stream_to_window_pred(
         if tr_found is None:
             return None
         cols.append(np.asarray(tr_found.data, dtype=np.float32))
+        if ann_starttime is None:
+            ann_starttime = getattr(tr_found.stats, "starttime", None)
     lengths = {int(c.shape[0]) for c in cols}
     if len(lengths) != 1:
         return None
@@ -644,18 +657,37 @@ def _annotate_stream_to_window_pred(
     if window_start < 0 or window_start + in_samples > preprocessed_T:
         return None
 
-    if t_ann == preprocessed_T:
-        sl = mat[window_start : window_start + in_samples, :]
-    else:
-        scale = (t_ann - 1) / max(preprocessed_T - 1, 1)
+    # Compute time offset between annotation and input stream (in samples).
+    # annotation sample 0 corresponds to input sample `offset_samples`.
+    offset_samples = 0
+    if input_stream is not None and ann_starttime is not None:
+        try:
+            input_starttime = input_stream[0].stats.starttime
+            sr = float(input_stream[0].stats.sampling_rate)
+            offset_samples = int(round(float(ann_starttime - input_starttime) * sr))
+        except Exception:
+            offset_samples = 0
+
+    # Adjust window_start for the offset: we want samples from the *input* grid,
+    # but annotation grid is shifted by offset_samples.
+    adj_window_start = window_start - offset_samples
+
+    # After offset, the annotation covers input samples [offset, offset + t_ann).
+    # The effective input length covered by annotation is t_ann (1:1 mapping after offset).
+    # If t_ann differs from (preprocessed_T - 2*offset), we still need resampling,
+    # but the simple case is t_ann == effective length (scale = 1).
+
+    if adj_window_start < 0 or adj_window_start + in_samples > t_ann:
+        # Window falls outside annotation coverage - can happen if the annotation
+        # didn't cover the requested window region. Fall back to clipped extraction.
         idx = []
         for j in range(in_samples):
-            ia = window_start + j
-            ia = int(np.clip(ia, 0, preprocessed_T - 1))
-            ib = int(round(ia * scale))
-            ib = int(np.clip(ib, 0, t_ann - 1))
-            idx.append(ib)
+            ia = adj_window_start + j
+            ia = int(np.clip(ia, 0, t_ann - 1))
+            idx.append(ia)
         sl = mat[np.array(idx, dtype=np.intp), :]
+    else:
+        sl = mat[adj_window_start : adj_window_start + in_samples, :]
 
     out = sl[None, ...].astype(np.float32, copy=False)
     if out.ndim != 3 or out.shape[0] != 1 or out.shape[1] != in_samples:
@@ -1133,6 +1165,7 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                                     preprocessed_T=pre_T,
                                                     window_start=w0,
                                                     in_samples=in_samples,
+                                                    input_stream=streams_n[0][1],
                                                 )
                                                 pq_b: Optional[Dict[str, Any]] = None
                                                 if pred_b is not None:
@@ -1548,6 +1581,7 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                                                 preprocessed_T=pre_T,
                                                 window_start=w0,
                                                 in_samples=in_samples,
+                                                input_stream=streams_n[0][1],
                                             )
                                             pq_bd: Optional[Dict[str, Any]] = None
                                             if pred_b is not None:
