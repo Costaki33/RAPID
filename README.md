@@ -137,6 +137,71 @@ For a broader sweep of probability and pick drift vs FP32 on miniSEED workloads,
 Baseline collapses the lean stages into `annotate_end_to_end`; the lean backends
 expose them separately so we can see *where* the speedup comes from.
 
+### EQCCTPro orchestration sweep (`cpu_test_results.csv`)
+
+Runs driven by `scripts/run_seisbench_sweep.py` (Ripper, Model-Actor, Slipstream)
+write timing rows to `results/orchestration_sweep/.../timing/cpu_test_results.csv`.
+Those columns use a different schema from the lean benchmark stages above
+(actor creation, per-task preprocess/inference/write, sum compute, scheduling residual).
+
+See **[docs/cpu_test_results_timing.md](docs/cpu_test_results_timing.md)** for
+column definitions and how to interpret `Sum Task Compute Time` vs wall-clock metrics.
+
+### Parallel orchestrator (faster sweeps via CPU/GPU isolation)
+
+`scripts/run_parallel_sweep.py` runs the three strategies **concurrently** to cut
+wall-clock time, giving each one an isolated slice of hardware so they don't fight
+over cores or a GPU:
+
+- **CPU phase** — all strategies at once on disjoint core ranges (with `--max-cpus 20`):
+  Ripper -> cores `0-19`, Model-Actor -> `20-39`, Slipstream -> `40-59`. Each worker
+  is `taskset`-pinned and gets its own Ray temp dir; results still land in the same
+  per-strategy `cpu_test_results.csv` files (no contention).
+- **Single-GPU phase** — 1 GPU per strategy, rotated across the available GPUs
+  (`--gpus 0,1`), so up to two strategies run at once (e.g. Ripper on GPU 0,
+  Model-Actor on GPU 1, then Slipstream rotates back to GPU 0). Each GPU slot also
+  gets a disjoint CPU range for its preprocessing workers.
+- **Dual-GPU phase** (run *after* the single-GPU phase) — each strategy uses **both**
+  GPUs (`--gpu-ids 0,1 --min-gpus 2`), run sequentially since both GPUs are busy. The
+  new `--min-gpus 2` skips re-running the 1-GPU points already recorded.
+
+**RAM is the real limiter** (each actor ≈ 2.3 GB). Running three strategies at once
+could OOM a 500 GB box if each one independently capped against the whole machine. The
+orchestrator prevents this by giving every concurrently-running strategy a **disjoint
+RAM slice** via the `EQCCTPRO_RAM_BUDGET_MB` env var, which `EvaluateSystem` and the Ray
+workers honor when capping actors. With `--max-parallel 3` on ~500 GB, each strategy gets
+~153 GB (≈ 66 actors); the three together stay under budget.
+
+- `--ram-budget-gb` total RAM to plan against (default: autodetect installed RAM).
+- `--ram-reserve-gb` held back for OS/driver/page cache (default 40).
+- `--max-parallel` strategies running at once. `1` = fully **sequential**, and each
+  strategy then gets the *full* budget (max actors) — slowest wall-clock but maximal
+  per-strategy concurrency. The default runs all selected strategies at once.
+
+```bash
+# Prepare networks once, then CPU + single-GPU phases (all 3 in parallel, RAM split):
+python scripts/run_parallel_sweep.py --phase cpu+gpu --ram-budget-gb 500
+
+# Safer middle ground: two at a time, each gets half the budget:
+python scripts/run_parallel_sweep.py --phase cpu --ram-budget-gb 500 --max-parallel 2
+
+# Fully sequential (each strategy uses the whole budget / max actors):
+python scripts/run_parallel_sweep.py --phase cpu --ram-budget-gb 500 --max-parallel 1
+
+# Dual-GPU phase later (2-GPU points only):
+python scripts/run_parallel_sweep.py --phase dual-gpu
+```
+
+The underlying `scripts/run_seisbench_sweep.py` gained `--cpu-offset` (affinity base),
+`--only-strategies` (filter `--run-all`), and `--min-gpus` (skip smaller GPU counts).
+Per-strategy logs go to `results/logs/parallel/`.
+
+### Native SeisBench ``classify()`` / ``annotate()`` sweep
+
+Direct SeisBench API baselines (no Ray orchestration) on the same 250/580 station
+networks: ``scripts/run_native_seisbench_sweep.py``. Results under
+``results/native_seisbench_sweep/``. See the script docstring for ``--run-all``.
+
 ### The method families (evolution of speedups)
 
 Every row in `results/matrix.jsonl` falls into one of these families. They're
