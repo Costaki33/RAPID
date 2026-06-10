@@ -254,7 +254,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", required=True, choices=["stead", "txed"])
     ap.add_argument("--n-stations", type=int, required=True)
-    ap.add_argument("--out-root", type=Path, default=_ROOT.parent / "data" / "seisbench_networks")
+    ap.add_argument("--out-root", type=Path, default=_ROOT / "data" / "seisbench_networks")
     ap.add_argument(
         "--n-unique",
         type=int,

@@ -1,4 +1,4 @@
-name: eqcctpro
+name: rapid
 channels:
   - defaults
 dependencies:
@@ -13,7 +13,8 @@ dependencies:
   - ca-certificates
   - openssl
   - pip:
-      - eqcctpro
+      # eqcctpro is vendored inside this repo (RAPID/eqcctpro); the PyPI
+      # package of the same name is deprecated -- do not install it.
       - numpy==1.26.4
       - scipy==1.15.1
       - pandas==2.2.3

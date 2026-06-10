@@ -1,0 +1,4256 @@
+"""
+parallelization.py has access to all Ray functions: mseed_predictor(), parallel_predict(), ModelActor(), and their dependencies. 
+It is a level of abstraction so we can make the code more concise and cleaner
+"""
+import os 
+from collections import defaultdict
+
+import ray
+import csv
+import sys
+import ast
+import math
+import time
+import json
+import glob
+import queue 
+import obspy
+import psutil
+import random
+import numbers
+import logging
+import platform
+import traceback
+import numpy as np
+from eqcctpro.tools import *
+from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+from eqcctpro.pick_output import (
+    PickOutputSink,
+    aggregate_station_mseed_for_summary,
+    ascii_summary_results_path,
+    build_ascii_summary_row_tuple,
+    format_detection_confidence_threshold_summary,
+    format_pick_time_cell,
+    merge_ascii_summary_rows,
+    normalize_ascii_station_pick_format,
+    normalize_pick_output_format,
+    prediction_results_path,
+    resolve_picker_model_label,
+    write_ascii_run_summary,
+    write_mseed_error_reference_beside_summary,
+    refresh_executive_picks_summary,
+    refresh_executive_picks_summary_from_chunk_output_dir,
+    write_station_pick_log,
+)
+from eqcctpro.waveform_data_quality import log_known_waveform_quality_issues
+from os import listdir
+from obspy import UTCDateTime
+from datetime import datetime, timedelta 
+from logging.handlers import QueueHandler
+
+# =============================================================================
+# RESOURCE REQUIREMENTS (MB) - Based on isolated process testing
+# =============================================================================
+# These values represent the "first-load" memory footprint when each model
+# is loaded into a fresh process (like a Ray ModelActor). This includes:
+# - Library initialization (PyTorch/TensorFlow, cuDNN, CUDA context)
+# - Model architecture definition
+# - Model weights
+# - Inference buffers and activations
+
+# Safety buffers for unexpected allocations during inference (ModelActor mode)
+# These account for Ray worker process overhead, framework (TF/PyTorch) initialization,
+# and runtime memory spikes.
+# 
+# Calibrated from empirical GPU test data (2x 49GB GPUs, 93100 MB pool):
+# - EQCCT: 26 actors succeeded with requested 2756 MB/actor (base 1732 + buffer 1024)
+# - PhaseNet: 58 actors succeeded with requested 1524 MB/actor (base 500 + buffer 1024)
+# - EQTransformer: 32 actors succeeded with requested 2064 MB/actor (base 528 + buffer 1536)
+#
+# Using 1024 MB as baseline, which proved stable for TensorFlow and smaller PyTorch models.
+# The cudnn_headroom parameter provides additional safety margin.
+VRAM_BUFFER_MB = 1024.0   # 1GB Extra VRAM headroom per model actor (empirically calibrated)
+RAM_BUFFER_MB = 1536.0    # 1.5GB Extra RAM headroom per model actor (for data buffers/Ray overhead)
+
+# GPU Mode - VRAM requirements (MB) for each model actor (first-load cost)
+# These include the CUDA context overhead (~500MB) that each actor pays
+# Measured via test_resource_usage.py using isolated process + NVML
+SEISBENCH_MODEL_VRAM_MB = {
+    ('PhaseNet', 'original'): 500.0,
+    ('PhaseNet', 'stead'): 502.0,
+    ('PhaseNet', 'ethz'): 502.0,
+    ('PhaseNet', 'scedc'): 502.0,
+    ('PhaseNet', 'pisdl'): 502.0,
+    ('PhaseNet', 'instance'): 502.0,
+    ('PhaseNetLight', 'stead'): 500.0,
+    ('PhaseNetLight', 'ethz'): 500.0,
+    ('PhaseNetLight', 'scedc'): 500.0,
+    ('PhaseNetLight', 'instance'): 500.0,
+    ('EQTransformer', 'original'): 528.0,
+    ('EQTransformer', 'original_nonconservative'): 530.0,
+    ('EQTransformer', 'stead'): 528.0,
+    ('EQTransformer', 'ethz'): 528.0,
+    ('EQTransformer', 'scedc'): 528.0,
+    ('EQTransformer', 'instance'): 528.0,
+    ('GPD', 'original'): 584.0
+}
+
+# GPU Mode - RAM requirements (MB) for each model actor (first-load cost)
+# Includes PyTorch + ObsPy + CUDA runtime in system RAM
+# Measured via test_resource_usage.py using isolated process + psutil RSS
+SEISBENCH_MODEL_RAM_MB = {
+    ('PhaseNet', 'original'): 870.0,
+    ('PhaseNet', 'stead'): 889.0,
+    ('PhaseNet', 'ethz'): 900.0,
+    ('PhaseNet', 'scedc'): 889.0,
+    ('PhaseNet', 'pisdl'): 887.0,
+    ('PhaseNet', 'instance'): 897.0,
+    ('PhaseNetLight', 'stead'): 861.0,
+    ('PhaseNetLight', 'ethz'): 861.0,
+    ('PhaseNetLight', 'scedc'): 873.0,
+    ('PhaseNetLight', 'instance'): 861.0,
+    ('EQTransformer', 'original'): 1001.0,
+    ('EQTransformer', 'original_nonconservative'): 1017.0,
+    ('EQTransformer', 'stead'): 1017.0,
+    ('EQTransformer', 'ethz'): 1021.0,
+    ('EQTransformer', 'scedc'): 1025.0,
+    ('EQTransformer', 'instance'): 1019.0,
+    ('GPD', 'original'): 876.0
+    }
+
+# CPU Mode - RAM requirements (MB) for each model (no CUDA overhead)
+# Measured via test_resource_usage.py using isolated process + psutil RSS
+SEISBENCH_MODEL_CPU_RAM_MB = {
+    ('PhaseNet', 'original'): 502.0,
+    ('PhaseNet', 'stead'): 511.0,
+    ('PhaseNet', 'ethz'): 516.0,
+    ('PhaseNet', 'scedc'): 514.0,
+    ('PhaseNet', 'pisdl'): 501.0,
+    ('PhaseNet', 'instance'): 501.0,
+    ('PhaseNetLight', 'stead'): 502.0,
+    ('PhaseNetLight', 'ethz'): 498.0,
+    ('PhaseNetLight', 'scedc'): 512.0,
+    ('PhaseNetLight', 'instance'): 512.0,
+    ('EQTransformer', 'original'): 521.0,
+    ('EQTransformer', 'original_nonconservative'): 524.0,
+    ('EQTransformer', 'stead'): 509.0,
+    ('EQTransformer', 'ethz'): 511.0,
+    ('EQTransformer', 'scedc'): 509.0,
+    ('EQTransformer', 'instance'): 522.0,
+    ('GPD', 'original'): 576.0
+}
+
+# EQCCT Model Requirements
+# Measured via test_resource_usage.py using isolated process
+EQCCT_GPU_VRAM_MB = 1732.0   # TensorFlow + XLA compilation + inference buffers
+EQCCT_GPU_RAM_MB = 2311.0    # Heavy due to XLA compiled graph stored in system RAM
+EQCCT_CPU_RAM_MB = 728.0     # TensorFlow CPU-only runtime
+
+def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0, logger=None):
+    """
+    Get VRAM requirement for a SeisBench model including buffer (ModelActor mode).
+    
+    Args:
+        parent_model_name: SeisBench model class (e.g., 'PhaseNet')
+        child_model_name: Pretrained version (e.g., 'original')
+        default_mb: Default if model not found in lookup table
+        logger: Optional logger to warn when using default values
+        
+    Returns:
+        float: Total VRAM in MB needed for one model actor
+    """
+    key = (parent_model_name, child_model_name)
+    if key not in SEISBENCH_MODEL_VRAM_MB:
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' - using default VRAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_vram = default_mb
+    else:
+        base_vram = SEISBENCH_MODEL_VRAM_MB[key]
+    return base_vram + VRAM_BUFFER_MB
+
+def get_seisbench_model_vram_mb_ripper(parent_model_name, child_model_name, default_mb=500.0, logger=None):
+    """
+    Get VRAM requirement for a SeisBench model in Ripper mode.
+    
+    Uses empirically-calibrated initialization multipliers based on actual GPU test data.
+    Smaller models have relatively higher overhead due to fixed CUDA context costs.
+    
+    Calibration data (2x 49GB GPUs, 93100 MB pool):
+    - PhaseNet: 58 actors → ~1605 MB/actor → 1.65x base
+    - EQTransformer: 32 actors → ~2909 MB/actor → 1.90x base (larger model)
+    
+    We add a small safety margin to empirical values for robustness.
+    """
+    # Model-specific multipliers calibrated from empirical GPU test results
+    # Smaller models have higher relative overhead (CUDA context is fixed cost)
+    RIPPER_MULTIPLIERS = {
+        'PhaseNet': 1.7,       # Empirical 1.65x + margin
+        'PhaseNetLight': 1.7,  # Similar architecture to PhaseNet
+        'EQTransformer': 2.0,  # Empirical 1.90x + margin (larger model)
+        'GPD': 1.8,            # Medium-sized model
+    }
+    
+    multiplier = RIPPER_MULTIPLIERS.get(parent_model_name, 1.8)  # Default for unknown models
+    
+    key = (parent_model_name, child_model_name)
+    if key not in SEISBENCH_MODEL_VRAM_MB:
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' - using default VRAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_vram = default_mb
+    else:
+        base_vram = SEISBENCH_MODEL_VRAM_MB[key]
+    return base_vram * multiplier
+
+def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True, default_mb=500.0, logger=None):
+    """
+    Get RAM requirement for a SeisBench model including buffer.
+    
+    Args:
+        parent_model_name: SeisBench model class (e.g., 'PhaseNet')
+        child_model_name: Pretrained version (e.g., 'original')
+        use_gpu: Whether GPU mode is being used
+        default_mb: Default if model not found in lookup table
+        logger: Optional logger to warn when using default values
+        
+    Returns:
+        float: Total RAM in MB needed for one model actor
+    """
+    key = (parent_model_name, child_model_name)
+    lookup_table = SEISBENCH_MODEL_RAM_MB if use_gpu else SEISBENCH_MODEL_CPU_RAM_MB
+    if key not in lookup_table:
+        mode_str = "GPU" if use_gpu else "CPU"
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' in {mode_str} mode - using default RAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_ram = default_mb
+    else:
+        base_ram = lookup_table[key]
+    return base_ram + RAM_BUFFER_MB
+
+def get_eqcct_vram_mb():
+    """Get VRAM requirement for EQCCT model actor (ModelActor mode)."""
+    return EQCCT_GPU_VRAM_MB + VRAM_BUFFER_MB
+
+def get_eqcct_vram_mb_ripper():
+    """
+    Get VRAM requirement for EQCCT in Ripper mode.
+    
+    Ripper mode loads/unloads models per-task, which means:
+    - Multiple tasks may initialize TensorFlow simultaneously
+    - CUDA contexts are created/destroyed repeatedly
+    - Memory fragmentation is higher
+    
+    Uses an empirically-calibrated multiplier based on actual GPU test data.
+    
+    Calibration data (2x 49GB GPUs, 93100 MB pool):
+    - 28 concurrent EQCCT tasks succeeded
+    - Process Tree VRAM: ~94,070 MB
+    - Actual per task: 3,360 MB
+    - Base VRAM: 1,732 MB
+    - Empirical multiplier: 1.94x
+    
+    We use 2.0x as a small safety margin above the empirical value.
+    """
+    # Empirically calibrated multiplier (1.94x measured, 2.0x with margin)
+    # Accounts for: TF graph build, XLA compilation, cuDNN workspace, fragmentation
+    RIPPER_INIT_MULTIPLIER = 2.0
+    return EQCCT_GPU_VRAM_MB * RIPPER_INIT_MULTIPLIER
+
+def get_eqcct_ram_mb(use_gpu=True):
+    """Get RAM requirement for EQCCT model actor."""
+    if use_gpu:
+        return EQCCT_GPU_RAM_MB + RAM_BUFFER_MB
+    else:
+        return EQCCT_CPU_RAM_MB + RAM_BUFFER_MB
+
+
+# =============================================================================
+# MEMORY AVAILABILITY FUNCTIONS
+# =============================================================================
+# These functions query available system memory to enable memory-aware actor creation.
+# Used when creating ModelActors to ensure we don't exceed physical memory limits.
+
+def get_available_vram_mb(gpu_ids=None, max_vram_mb=None, logger=None):
+    """
+    Get available VRAM in MB for the specified GPUs.
+    
+    If max_vram_mb is provided (user-defined cap), returns that value divided
+    equally among the specified GPUs (per-GPU budget). Otherwise, queries
+    the actual free VRAM from each GPU.
+    
+    Args:
+        gpu_ids: List of GPU IDs to query. If None, queries all available GPUs.
+        max_vram_mb: Optional user-defined total VRAM cap across all GPUs.
+                     If provided, this is the max budget (already divided by n_gpus externally).
+        logger: Optional logger for debug messages.
+        
+    Returns:
+        float: Available VRAM in MB (total across specified GPUs).
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        
+        if gpu_ids is None:
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            gpu_ids = list(range(gpu_count))
+        
+        # If user provided a max_vram_mb cap, use that
+        if max_vram_mb is not None and max_vram_mb > 0:
+            if logger:
+                logger.info(f"Using user-defined VRAM cap: {max_vram_mb:.0f} MB total")
+            pynvml.nvmlShutdown()
+            return float(max_vram_mb)
+        
+        # Otherwise, query actual free VRAM from each GPU
+        total_free_vram_mb = 0.0
+        for gpu_id in gpu_ids:
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                free_mb = mem_info.free / (1024 * 1024)  # Convert to MB
+                total_free_vram_mb += free_mb
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Could not query VRAM for GPU {gpu_id}: {e}")
+        
+        pynvml.nvmlShutdown()
+        
+        if logger:
+            logger.info(f"Total free VRAM across GPUs {gpu_ids}: {total_free_vram_mb:.0f} MB")
+        
+        return total_free_vram_mb
+    
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to query VRAM: {e}")
+        return 0.0
+
+
+def get_available_ram_mb(ram_safety_cap=0.90, logger=None):
+    """
+    Get available RAM in MB based on system memory and safety cap.
+    
+    Args:
+        ram_safety_cap: Fraction of TOTAL system RAM that can be used (0.0-1.0).
+                        This is applied to total RAM, not just available.
+        logger: Optional logger for debug messages.
+        
+    Returns:
+        float: Usable RAM in MB (total system RAM * safety_cap).
+    """
+    try:
+        mem = psutil.virtual_memory()
+        total_ram_mb = mem.total / (1024 * 1024)
+        available_ram_mb = mem.available / (1024 * 1024)
+        
+        # Budget for THIS process. Honors EQCCTPRO_RAM_BUDGET_MB (absolute slice for a
+        # parallel strategy); otherwise total RAM × safety cap. Consistent regardless
+        # of transient system state.
+        usable_ram_mb = effective_ram_budget_mb(ram_safety_cap)
+        
+        if logger:
+            logger.info(f"System RAM: Total={total_ram_mb:.0f} MB, Available={available_ram_mb:.0f} MB")
+            _budget_src = "EQCCTPRO_RAM_BUDGET_MB" if os.environ.get("EQCCTPRO_RAM_BUDGET_MB") else f"{ram_safety_cap:.0%} of total"
+            logger.info(f"Usable RAM budget: {usable_ram_mb:.0f} MB ({_budget_src})")
+        
+        return usable_ram_mb
+    
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to query RAM: {e}")
+        return 0.0
+
+def parse_time_range(time_string):
+    """
+    Parses a time range string and returns start time, end time, and time delta.
+    """
+    try:
+        start_str, end_str = time_string.split('_')
+        start_time = datetime.strptime(start_str, "%Y%m%dT%H%M%SZ")
+        end_time = datetime.strptime(end_str, "%Y%m%dT%H%M%SZ")
+        time_delta = end_time - start_time
+
+        return start_time, end_time, time_delta
+
+    except ValueError as e:
+        return None, None, None #Error handling.
+
+
+def _format_analysis_time_window(
+    analysis_window_start_str,
+    analysis_window_end_str,
+    timechunk_id,
+    analysis_period_minutes,
+):
+    """
+    Human-readable analysis period for ASCII summary: user start/end if provided,
+    else timechunk directory bounds, else minutes span only.
+    """
+    s = (analysis_window_start_str or "").strip()
+    e = (analysis_window_end_str or "").strip()
+    if s and e:
+        return f"{s} – {e}"
+    if timechunk_id:
+        try:
+            st, en, _ = parse_time_range(timechunk_id)
+            if st is not None and en is not None:
+                return (
+                    f"{st.strftime('%Y-%m-%d %H:%M:%S')} – "
+                    f"{en.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        except Exception:
+            pass
+    if analysis_period_minutes is not None:
+        try:
+            return f"(analysis span {float(analysis_period_minutes):.6g} minutes)"
+        except Exception:
+            pass
+    return ""
+
+
+# Per-task timing breakdown keys (seconds). Tasks may return a trailing dict with
+# these keys so the driver can report where in-task time is spent.
+_TASK_TIMING_KEYS = (
+    "model_load",
+    "warmup",       # first-inference cost (CUDA init / autotune / compile), measured per task in Ripper mode
+    "waveform",     # data acquisition: mSEED read / shared-Stream select + 3C assembly
+    "preprocess",   # model-input preprocessing (resample/normalize/window), measured in worker or actor
+    "inference",    # model forward (actor RPC inference minus its measured preprocess/pick segments)
+    "write",        # pick extraction + post-processing + writing picks to file
+    "compute",
+)
+
+
+def _make_task_timing(model_load=None, preprocess=None, inference=None, write=None, compute=None,
+                      waveform=None, warmup=None):
+    """Build a per-task timing dict; missing phases are stored as None (excluded from means)."""
+    return {
+        "model_load": model_load,
+        "warmup": warmup,
+        "waveform": waveform,
+        "preprocess": preprocess,
+        "inference": inference,
+        "write": write,
+        "compute": compute,
+    }
+
+
+def _avg_task_timings(timings):
+    """Mean of each timing phase across per-task dicts (0.0 when no samples)."""
+    out = {k: 0.0 for k in _TASK_TIMING_KEYS}
+    if not timings:
+        return out
+    for k in _TASK_TIMING_KEYS:
+        vals = [t[k] for t in timings if isinstance(t, dict) and t.get(k) is not None]
+        if vals:
+            out[k] = sum(vals) / len(vals)
+    return out
+
+
+def _sum_task_timings(timings):
+    """Sum of each measured timing phase across per-task dicts (serial-equivalent
+    busy seconds per stage; the measured basis for stage breakdowns)."""
+    out = {k: 0.0 for k in _TASK_TIMING_KEYS}
+    for t in timings or []:
+        if not isinstance(t, dict):
+            continue
+        for k in _TASK_TIMING_KEYS:
+            v = t.get(k)
+            if v is not None:
+                out[k] += float(v)
+    return out
+
+
+def _actor_stage_timing(classify_output):
+    """Measured in-actor stage segments attached to a classify output, if any."""
+    st = getattr(classify_output, "stage_timing", None) or getattr(
+        classify_output, "eqcctpro_stage_timing", None
+    )
+    return st if isinstance(st, dict) else {}
+_SLIPSTREAM_SB_MODEL_CACHE: dict = {}
+
+
+def _slipstream_seisbench_model(parent: str, child: str):
+    key = (parent, child)
+    if key not in _SLIPSTREAM_SB_MODEL_CACHE:
+        from eqcctpro.seisbench_models import SeisBenchModels
+
+        sb = SeisBenchModels(parent, child)
+        _SLIPSTREAM_SB_MODEL_CACHE[key] = sb.load_model()
+    return _SLIPSTREAM_SB_MODEL_CACHE[key]
+
+
+def _slipstream_arrays_from_station(args, station, files_list, st_sel, use_shared_stream):
+    """Worker-side SeisBench preprocess once; actor receives compact (3, T) float32.
+
+    Returns ``(arr, start_iso, sr, (hp, lp), timing)`` where ``timing`` is the
+    measured split ``{"waveform_s": <read/select+3C>, "preprocess_s": <model prep>}``.
+    """
+    from rapid.data import preprocess_for_model, stream_to_3c_array
+
+    from eqcctpro.seisbench_models import (
+        mseed2stream_for_slipstream,
+        process_raw_station_stream_for_slipstream,
+    )
+
+    parent = args.get("seisbench_parent_model") or "PhaseNet"
+    child = args.get("seisbench_child_model") or "original"
+    sb_model = _slipstream_seisbench_model(parent, child)
+
+    t0 = monotonic_s()
+    if use_shared_stream:
+        if st_sel is None or len(st_sel) == 0:
+            raw3c, _, _ = mseed2stream_for_slipstream(args, files_list, station)
+        else:
+            raw3c, _, _ = process_raw_station_stream_for_slipstream(args, st_sel, station)
+    else:
+        raw3c, _, _ = mseed2stream_for_slipstream(args, files_list, station)
+    waveform_s = monotonic_s() - t0
+
+    t1 = monotonic_s()
+    argdict = dict(
+        strict=False,
+        flexible_horizontal_components=True,
+    )
+    pre = preprocess_for_model(sb_model, raw3c, argdict=argdict)
+    timing = {"waveform_s": waveform_s, "preprocess_s": monotonic_s() - t1}
+    if len(pre) == 0:
+        return None, None, None, None, timing
+
+    co = getattr(sb_model, "component_order", None) or "ZNE"
+    arr = stream_to_3c_array(pre, component_order=co)
+    timing["preprocess_s"] = monotonic_s() - t1
+    if arr is None:
+        return None, None, None, None, timing
+
+    sr = float(getattr(sb_model, "sampling_rate", None) or pre[0].stats.sampling_rate)
+    stream_start = min(tr.stats.starttime for tr in pre)
+    hp = float(args.get("waveform_filter_freqmin", 1.0))
+    lp = float(args.get("waveform_filter_freqmax", 45.0))
+    return arr, stream_start.isoformat(), sr, (hp, lp), timing
+
+
+def _sum_task_compute(timings):
+    """Sum of per-task compute time across all tasks (serial-equivalent busy time)."""
+    if not timings:
+        return 0.0
+    return float(sum(t["compute"] for t in timings if isinstance(t, dict) and t.get("compute") is not None))
+
+
+def _unpack_modelactor_predict_result(result):
+    """``(log, wf_time[, ascii_row][, timing])`` from ModelActor station tasks.
+
+    Returns ``(log, wf_time, ascii_row, timing)``. ``timing`` is the trailing
+    per-task timing dict when present (older returns omit it).
+    """
+    timing = result[-1] if len(result) >= 2 and isinstance(result[-1], dict) else None
+    core = result[:-1] if timing is not None else result
+    log_e = core[0]
+    wf = core[1] if len(core) >= 2 else None
+    ascii_row = core[2] if len(core) >= 3 else None
+    return log_e, wf, ascii_row, timing
+
+
+def _unpack_ripper_predict_result(result):
+    """``(log, model_load, wf_time[, ascii_row][, timing])`` from Ripper station tasks.
+
+    Returns ``(log, model_load, wf_time, ascii_row, timing)``.
+    """
+    timing = result[-1] if len(result) >= 2 and isinstance(result[-1], dict) else None
+    core = result[:-1] if timing is not None else result
+    log_e = core[0]
+    ml = core[1] if len(core) >= 2 else None
+    wf = core[2] if len(core) >= 3 else None
+    ascii_row = core[3] if len(core) >= 4 else None
+    return log_e, ml, wf, ascii_row, timing
+
+
+def _eqcct_stream_to_nparray(args, st, station, files_list=None):
+    """
+    EQCCT preprocessing from an in-memory ObsPy Stream for a single station
+    (taper, bandpass, resample, windowing). Used by disk path and RIPPER ray.get path.
+    """
+    if st is None or len(st) == 0:
+        return None
+    st = obspy.Stream(traces=[tr.copy() for tr in st])
+    try:
+        st.merge(fill_value=0)
+    except Exception:
+        try:
+            st.merge(fill_value=0)
+        except Exception:
+            pass
+    if len(st) == 0:
+        return None
+
+    max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
+    st.taper(max_percentage=max_percentage, type='cosine')
+    ftype, freqmin, freqmax, f_corners, f_zp = resolve_waveform_filter_params(args, station)
+    apply_waveform_filter(st, ftype, freqmin, freqmax, f_corners, f_zp)
+
+    if any(tr.stats.sampling_rate != 100.0 for tr in st):
+        try:
+            st.interpolate(100, method="linear")
+        except Exception:
+            st = _resampling(st, antialias_lowpass_hz=freqmax)
+
+    st.trim(min(tr.stats.starttime for tr in st), max(tr.stats.endtime for tr in st), pad=True, fill_value=0)
+    start_time = st[0].stats.starttime
+    end_time = st[0].stats.endtime
+
+    if files_list:
+        trace_name = f"{files_list[0].split('/')[-2]}/{files_list[0].split('/')[-1]}"
+    else:
+        trace_name = f"{station}/ray_object_store"
+
+    meta = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "trace_name": trace_name,
+    }
+
+    data_set = {}
+    st_times = []
+    components = {tr.stats.channel[-1]: tr for tr in st}
+    time_shift = int(60 - (args['overlap'] * 60))
+
+    components_list = [
+        ['E', '1'],
+        ['N', '2'],
+        ['Z'],
+    ]
+
+    current_time = start_time
+    while current_time < end_time:
+        window_end = current_time + 60
+        st_times.append(str(current_time).replace('T', ' ').replace('Z', ''))
+        npz_data = np.zeros((6000, 3))
+
+        for col_idx, comp_options in enumerate(components_list):
+            for comp in comp_options:
+                if comp in components:
+                    tr = components[comp].copy().slice(current_time, window_end)
+                    data = tr.data[:6000]
+                    if len(data) < 6000:
+                        data = np.pad(data, (0, 6000 - len(data)), 'constant')
+                    npz_data[:, col_idx] = data
+                    break
+
+        key = str(current_time).replace('T', ' ').replace('Z', '')
+        data_set[key] = npz_data
+        current_time += time_shift
+
+    meta["trace_start_time"] = st_times
+
+    try:
+        meta.update({
+            "receiver_code": st[0].stats.station,
+            "instrument_type": 0,
+            "network_code": 0,
+            "receiver_latitude": 0,
+            "receiver_longitude": 0,
+            "receiver_elevation_m": 0
+        })
+    except Exception:
+        meta.update({
+            "receiver_code": station,
+            "instrument_type": 0,
+            "network_code": 0,
+            "receiver_latitude": 0,
+            "receiver_longitude": 0,
+            "receiver_elevation_m": 0
+        })
+
+    return meta, data_set, freqmin, freqmax
+
+
+def _mseed2nparray(args, files_list, station):
+    ' read miniseed files and from a list of string names and returns 3 dictionaries of numpy arrays, meta data, and time slice info'
+
+    st = obspy.Stream()
+    for file in files_list:
+        temp_st = read_station_waveform_file(file)
+        merge_mseed_stream_after_read(temp_st)
+        temp_st.detrend('demean')
+        if temp_st:
+            st += temp_st
+
+    if (not st or len(st) == 0) and files_list and isinstance(args, dict):
+        inp = args.get("input_dir")
+        if inp:
+            chunk_abs = {os.path.abspath(p) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(str(inp), station):
+                if os.path.abspath(file) in chunk_abs:
+                    continue
+                temp_st = read_station_waveform_file(file)
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend('demean')
+                if temp_st:
+                    st += temp_st
+
+    if not st or len(st) == 0:
+        return None
+    return _eqcct_stream_to_nparray(args, st, station, files_list=files_list)
+
+
+def _mseed_predictor_log_prefix(timechunk_id: str | None, input_dir: str) -> str:
+    """Bracket prefix for mseed_predictor / station-task logs when multiple timechunks run concurrently."""
+    tid = (timechunk_id or "").strip()
+    if not tid:
+        base = os.path.basename(os.path.abspath(input_dir))
+        if "_" in base and len(base) >= 10:
+            tid = base
+        else:
+            tid = "unknown_chunk"
+    return f"[timechunk_id={tid}] "
+
+
+class _ChunkLogAdapter(logging.LoggerAdapter):
+    """Prepends a fixed chunk context to every message (driver-side mseed_predictor process)."""
+
+    def process(self, msg, kwargs):
+        p = self.extra.get("prefix") or ""
+        return f"{p}{msg}", kwargs
+
+
+def _apply_log_chunk_prefix(args: dict | None, msg: str) -> str:
+    """Reserved for worker returns; chunk context is applied by driver :class:`_ChunkLogAdapter` only."""
+    return msg
+
+
+def _glob_waveform_files_in_dir(station_dir: str) -> list[str]:
+    """Delegate to :func:`~eqcctpro.tools.glob_waveform_files_in_directory` (single glob implementation)."""
+    return glob_waveform_files_in_directory(station_dir)
+
+
+def _list_station_mseed_files(input_dir: str, station: str) -> list[str]:
+    """
+    Per-station miniSEED paths for a timechunk directory.
+    Supports classic ``input_dir/<station>/*`` and post-split ``abstracted_waveforms/<station>/*``.
+
+    **Resolution order**
+
+    1. **Chunk-local** files under *input_dir* (the timechunk folder) take precedence when
+       present. That guarantees listing matches the tree users see under each chunk.
+
+    2. If the chunk has **no** miniSEED for that station, fall back to the parent directory
+       ``<parent>/<station>/*.mseed`` when *input_dir* looks like a timechunk id.
+
+    If chunk-local paths exist but **decode to no traces** (empty or corrupt copies),
+    :func:`_load_ripper_mseed_stream`, :func:`_mseed2nparray`, and
+    :func:`~eqcctpro.seisbench_models.mseed2stream_3c` try the same parent directory
+    (skipping paths already read from the chunk) so good originals next to the chunk
+    folders are still used.
+    """
+    input_dir = os.path.abspath(input_dir)
+    chunk_base = os.path.basename(input_dir)
+    parent = os.path.dirname(input_dir)
+    parent_station = os.path.join(parent, str(station))
+
+    chunk_paths: list[str] = []
+    for base in (
+        os.path.join(input_dir, str(station)),
+        os.path.join(input_dir, "abstracted_waveforms", str(station)),
+    ):
+        chunk_paths.extend(_glob_waveform_files_in_dir(base))
+    seen_chunk: set[str] = set()
+    unique_chunk: list[str] = []
+    for p in chunk_paths:
+        if p not in seen_chunk:
+            seen_chunk.add(p)
+            unique_chunk.append(p)
+    if unique_chunk:
+        return unique_chunk
+
+    if looks_like_timechunk_id(chunk_base) and os.path.isdir(parent_station):
+        from_parent = _glob_waveform_files_in_dir(parent_station)
+        if from_parent:
+            return from_parent
+
+    return []
+
+
+def _load_ripper_mseed_stream(
+    input_dir: str,
+    station_list: list,
+    logger: logging.Logger | None = None,
+) -> tuple[obspy.Stream, dict[str, dict[str, str]]]:
+    """
+    Read all station miniSEED once on the driver (scmlpick-style) for ray.put.
+    Traces are read, merged per file, demeaned — same as the start of per-task disk reads.
+
+    Reads are **sequential** (one file at a time). Parallel decode inside a Ray worker has
+    been observed to crash workers (libmseed / ObsPy not reliably thread-safe per process).
+
+    When *logger* is set, each file is logged with ``[mSEED CLEAN|RECOVERED|FAILED]`` and a
+    run summary counts files and total decoded vs header-implied samples.
+
+    Returns ``(stream, station_mseed_stats)`` where *station_mseed_stats* maps station id to
+    ``aggregate_station_mseed_for_summary`` strings for ``summary_results.ascii``.
+    """
+    full = obspy.Stream()
+    n_files = 0
+    n_clean = n_rec = n_fail = 0
+    sum_dec = 0
+    sum_exp = 0
+    n_exp_known = 0
+    per_station_reports: dict[str, list[dict]] = defaultdict(list)
+
+    def _consume_preload_report(rep: dict, station_key: str) -> None:
+        nonlocal n_files, n_clean, n_rec, n_fail, sum_dec, sum_exp, n_exp_known
+        if not rep:
+            return
+        per_station_reports[str(station_key)].append(dict(rep))
+        n_files += 1
+        q = (rep.get("quality") or "").upper()
+        if q == "CLEAN":
+            n_clean += 1
+        elif q == "FAILED":
+            n_fail += 1
+        else:
+            n_rec += 1
+        d = int(rep.get("decoded_samples") or 0)
+        sum_dec += d
+        ex = rep.get("expected_header_samples")
+        if ex is not None:
+            sum_exp += int(ex)
+            n_exp_known += 1
+        if logger is not None:
+            exp_s = str(ex) if ex is not None else "?"
+            logger.info(
+                "[mSEED %s] %s decoded=%s expected_header=%s tags=%s",
+                q,
+                rep.get("basename", "?"),
+                d,
+                exp_s,
+                rep.get("recovery_tags") or [],
+            )
+
+    for station in station_list:
+        files_list = _list_station_mseed_files(input_dir, station)
+        n_before = len(full)
+        for file in files_list:
+            rep: dict = {}
+            temp_st = read_station_waveform_file(file, logger=None, report=rep)
+            _consume_preload_report(rep, station)
+            merge_mseed_stream_after_read(temp_st)
+            temp_st.detrend("demean")
+            if temp_st:
+                full += temp_st
+        if len(full) == n_before and files_list:
+            chunk_abs = {os.path.abspath(p) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(input_dir, station):
+                if os.path.abspath(file) in chunk_abs:
+                    continue
+                rep = {}
+                temp_st = read_station_waveform_file(file, logger=None, report=rep)
+                _consume_preload_report(rep, station)
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend("demean")
+                if temp_st:
+                    full += temp_st
+
+    if logger is not None and n_files > 0:
+        if n_exp_known == n_files:
+            exp_msg = str(sum_exp)
+        elif n_exp_known > 0:
+            exp_msg = (
+                f"{sum_exp} (partial sum over {n_exp_known}/{n_files} file(s) with header npts)"
+            )
+        else:
+            exp_msg = "unknown"
+        logger.info(
+            "mSEED preload summary: %s file(s) — CLEAN=%s RECOVERED=%s FAILED=%s — "
+            "decoded_samples_total=%s expected_header_total=%s",
+            n_files,
+            n_clean,
+            n_rec,
+            n_fail,
+            sum_dec,
+            exp_msg,
+        )
+
+    station_mseed_stats: dict[str, dict[str, str]] = {}
+    for st in station_list:
+        station_mseed_stats[str(st)] = aggregate_station_mseed_for_summary(
+            per_station_reports.get(str(st), [])
+        )
+    return full, station_mseed_stats
+
+
+def _trace_matches_station_task(tr, station_id: str) -> bool:
+    """
+    Map timechunk subdirectory names to ObsPy trace headers.
+
+    ``build_station_list_from_dir`` uses directory basenames (e.g. ``TX_EF09``).
+    MiniSEED stores network and station separately (``TX`` + ``EF09``), so comparing
+    only ``tr.stats.station`` to ``TX_EF09`` never matches.
+
+    Also handles: dotted ``tr.id`` (``NET.STA.LOC.CHA``), FDSN space-padding, and
+    composite ``stats.station`` values like ``4P-BB01`` where the folder is ``BB01``.
+    """
+    sid = str(station_id).strip()
+    if not sid:
+        return False
+
+    def _eq(a: str, b: str) -> bool:
+        return a == b or a.upper() == b.upper()
+
+    net = str(tr.stats.network or "").strip()
+    sta = str(tr.stats.station or "").strip()
+
+    if _eq(sta, sid):
+        return True
+
+    # Standard NET_STA / NET.STA directory naming
+    if net and _eq(f"{net}_{sta}", sid):
+        return True
+    if net and "_" in sid:
+        prefix, rest = sid.split("_", 1)
+        if prefix.upper() == net.upper() and _eq(rest.strip(), sta):
+            return True
+    dotted = sid.replace("_", ".", 1) if "_" in sid else sid
+    if net and _eq(f"{net}.{sta}", dotted):
+        return True
+
+    # ObsPy trace id: second token is always the station code (FDSN).
+    try:
+        parts = str(tr.id).split(".")
+        if len(parts) >= 2 and _eq(parts[1].strip(), sid):
+            return True
+    except Exception:
+        pass
+
+    # Some encoders put "NET-STA" or legacy composite into the station field
+    for sep in ("-", "_"):
+        if sep in sta:
+            for piece in sta.split(sep):
+                piece = piece.strip()
+                if piece and _eq(piece, sid):
+                    return True
+
+    return False
+
+
+def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obspy.Stream:
+    """
+    Subset a merged Stream to traces for one task station id (subdir name).
+
+    Callers may fall back to reading ``input_dir/<station>/*`` when this is empty:
+    miniSEED under that path is still processed even if trace headers do not match
+    the directory name (see ModelActor shared-Stream path).
+    """
+    return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
+
+
+def _station_sink_format_for_worker(args: dict) -> tuple[str, bool]:
+    """
+    Per-station file format and whether the driver aggregates a run-level ASCII summary.
+    When the main format is ``ascii``, the station file is ``xml`` or ``csv`` per
+    ``args['ascii_station_pick_format']``.
+    """
+    pick_fmt = normalize_pick_output_format(args.get("pick_output_format", "xml"))
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        sink_fmt = normalize_ascii_station_pick_format(args.get("ascii_station_pick_format"))
+    else:
+        sink_fmt = pick_fmt
+    return sink_fmt, use_ascii_summary
+
+
+def _output_writter_prediction(
+    meta,
+    sink,
+    Ppicks,
+    Pprob,
+    Spicks,
+    Sprob,
+    detection_memory,
+    prob_memory,
+    idx,
+    cq,
+    cqq,
+    ascii_p_list=None,
+    ascii_s_list=None,
+    ascii_chrono_list=None,
+):
+
+    """ 
+    
+    Writes one detection / picking row via ``sink`` (CSV or XML), and/or appends to
+    *ascii_p_list* / *ascii_s_list* for the per-station ASCII summary, and/or
+    *ascii_chrono_list* as ``(time_str, 'P'|'S')`` for ``<station>_outputs/<station>.log``.
+
+    Parameters
+    ----------
+    sink: PickOutputSink | None
+        Output sink for this station's pick file (XML/CSV); None only if the caller omits file output.
+
+    matches: dic
+        It contains the information for the detected and picked event.  
+  
+    snr: list of two floats
+        Estimated signal to noise ratios for picked P and S phases.   
+    
+    detection_memory : list
+        Keep the track of detected events.          
+        
+    Returns
+    -------   
+    detection_memory : list
+        Keep the track of detected events.  
+        
+        
+    """      
+
+    station_name = meta["receiver_code"]
+    station_lat = meta["receiver_latitude"]
+    station_lon = meta["receiver_longitude"]
+    station_elv = meta["receiver_elevation_m"]
+    start_time = meta["trace_start_time"][idx]
+    station_name = "{:<4}".format(station_name)
+    network_name = meta["network_code"]
+    network_name = "{:<2}".format(network_name)
+    instrument_type = meta["instrument_type"]
+    instrument_type = "{:<2}".format(instrument_type)  
+
+    try:
+        start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S.%f')
+    except Exception:
+        start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+        
+    def _date_convertor(r):  
+        if isinstance(r, str):
+            mls = r.split('.')
+            if len(mls) == 1:
+                new_t = datetime.strptime(r, '%Y-%m-%d %H:%M:%S')
+            else:
+                new_t = datetime.strptime(r, '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            new_t = r
+            
+        return new_t
+  
+    
+    p_time = []
+    p_prob = []
+    PdateTime = []
+    if Ppicks[0]!=None: 
+#for iP in range(len(Ppicks)):
+#if Ppicks[iP]!=None: 
+        p_time.append(start_time+timedelta(seconds= Ppicks[0]/100))
+        p_prob.append(Pprob[0])
+        PdateTime.append(_date_convertor(start_time+timedelta(seconds= Ppicks[0]/100)))
+        detection_memory.append(p_time) 
+        prob_memory.append(p_prob)  
+    else:          
+        p_time.append(None)
+        p_prob.append(None)
+        PdateTime.append(None)
+
+    s_time = []
+    s_prob = []    
+    SdateTime=[]
+    if Spicks[0]!=None: 
+#for iS in range(len(Spicks)):
+#if Spicks[iS]!=None: 
+        s_time.append(start_time+timedelta(seconds= Spicks[0]/100))
+        s_prob.append(Sprob[0])
+        SdateTime.append(_date_convertor(start_time+timedelta(seconds= Spicks[0]/100)))
+    else:
+        s_time.append(None)
+        s_prob.append(None)
+        SdateTime.append(None)
+
+    SdateTime = np.array(SdateTime)
+    s_prob = np.array(s_prob)
+    
+    p_prob = np.array(p_prob)
+    PdateTime = np.array(PdateTime)
+
+    p_cell = format_pick_time_cell(PdateTime[0])
+    s_cell = format_pick_time_cell(SdateTime[0])
+    if ascii_p_list is not None and p_cell:
+        ascii_p_list.append(p_cell)
+    if ascii_s_list is not None and s_cell:
+        ascii_s_list.append(s_cell)
+    if ascii_chrono_list is not None:
+        if p_cell:
+            ascii_chrono_list.append((p_cell, "P"))
+        if s_cell:
+            ascii_chrono_list.append((s_cell, "S"))
+
+    if sink is not None:
+        sink.write_pick_row([
+            meta["trace_name"],
+            network_name,
+            station_name,
+            instrument_type,
+            station_lat,
+            station_lon,
+            station_elv,
+            PdateTime[0],
+            p_prob[0],
+            SdateTime[0],
+            s_prob[0],
+        ])
+        sink.flush()
+
+    return detection_memory, prob_memory
+
+
+def _get_snr(data, pat, window=200):
+    
+    """ 
+    
+    Estimates SNR.
+    
+    Parameters
+    ----------
+    data : numpy array
+        3 component data.    
+        
+    pat: positive integer
+        Sample point where a specific phase arrives. 
+        
+    window: positive integer, default=200
+        The length of the window for calculating the SNR (in the sample).         
+        
+    Returns
+   --------   
+    snr : {float, None}
+       Estimated SNR in db. 
+       
+        
+    """      
+    import math
+    snr = None
+    if pat:
+        try:
+            if int(pat) >= window and (int(pat)+window) < len(data):
+                nw1 = data[int(pat)-window : int(pat)];
+                sw1 = data[int(pat) : int(pat)+window];
+                snr = round(10*math.log10((np.percentile(sw1,95)/np.percentile(nw1,95))**2), 1)           
+            elif int(pat) < window and (int(pat)+window) < len(data):
+                window = int(pat)
+                nw1 = data[int(pat)-window : int(pat)];
+                sw1 = data[int(pat) : int(pat)+window];
+                snr = round(10*math.log10((np.percentile(sw1,95)/np.percentile(nw1,95))**2), 1)
+            elif (int(pat)+window) > len(data):
+                window = len(data)-int(pat)
+                nw1 = data[int(pat)-window : int(pat)];
+                sw1 = data[int(pat) : int(pat)+window];
+                snr = round(10*math.log10((np.percentile(sw1,95)/np.percentile(nw1,95))**2), 1)    
+        except Exception:
+            pass
+    return snr 
+
+
+def _detect_peaks(x, mph=None, mpd=1, threshold=0, edge='rising', kpsh=False, valley=False):
+
+    """
+    
+    Detect peaks in data based on their amplitude and other features.
+
+    Parameters
+    ----------
+    x : 1D array_like
+        data.
+        
+    mph : {None, number}, default=None
+        detect peaks that are greater than minimum peak height.
+        
+    mpd : int, default=1
+        detect peaks that are at least separated by minimum peak distance (in number of data).
+        
+    threshold : int, default=0
+        detect peaks (valleys) that are greater (smaller) than `threshold in relation to their immediate neighbors.
+        
+    edge : str, default=rising
+        for a flat peak, keep only the rising edge ('rising'), only the falling edge ('falling'), both edges ('both'), or don't detect a flat peak (None).
+        
+    kpsh : bool, default=False
+        keep peaks with same height even if they are closer than `mpd`.
+        
+    valley : bool, default=False
+        if True (1), detect valleys (local minima) instead of peaks.
+
+    Returns
+    -------
+    ind : 1D array_like
+        indeces of the peaks in `x`.
+
+    Modified from 
+    ----------
+    .. [1] http://nbviewer.ipython.org/github/demotu/BMC/blob/master/notebooks/DetectPeaks.ipynb
+    
+
+    """
+
+    x = np.atleast_1d(x).astype('float64')
+    if x.size < 3:
+        return np.array([], dtype=int)
+    if valley:
+        x = -x
+    # find indices of all peaks
+    dx = x[1:] - x[:-1]
+    # handle NaN's
+    indnan = np.where(np.isnan(x))[0]
+    if indnan.size:
+        x[indnan] = np.inf
+        dx[np.where(np.isnan(dx))[0]] = np.inf
+    ine, ire, ife = np.array([[], [], []], dtype=int)
+    if not edge:
+        ine = np.where((np.hstack((dx, 0)) < 0) & (np.hstack((0, dx)) > 0))[0]
+    else:
+        if edge.lower() in ['rising', 'both']:
+            ire = np.where((np.hstack((dx, 0)) <= 0) & (np.hstack((0, dx)) > 0))[0]
+        if edge.lower() in ['falling', 'both']:
+            ife = np.where((np.hstack((dx, 0)) < 0) & (np.hstack((0, dx)) >= 0))[0]
+    ind = np.unique(np.hstack((ine, ire, ife)))
+    # handle NaN's
+    if ind.size and indnan.size:
+        # NaN's and values close to NaN's cannot be peaks
+        ind = ind[np.in1d(ind, np.unique(np.hstack((indnan, indnan-1, indnan+1))), invert=True)]
+    # first and last values of x cannot be peaks
+    if ind.size and ind[0] == 0:
+        ind = ind[1:]
+    if ind.size and ind[-1] == x.size-1:
+        ind = ind[:-1]
+    # remove peaks < minimum peak height
+    if ind.size and mph is not None:
+        ind = ind[x[ind] >= mph]
+    # remove peaks - neighbors < threshold
+    if ind.size and threshold > 0:
+        dx = np.min(np.vstack([x[ind]-x[ind-1], x[ind]-x[ind+1]]), axis=0)
+        ind = np.delete(ind, np.where(dx < threshold)[0])
+    # detect small peaks closer than minimum peak distance
+    if ind.size and mpd > 1:
+        ind = ind[np.argsort(x[ind])][::-1]  # sort ind by peak height
+        idel = np.zeros(ind.size, dtype=bool)
+        for i in range(ind.size):
+            if not idel[i]:
+                # keep peaks with the same height if kpsh is True
+                idel = idel | (ind >= ind[i] - mpd) & (ind <= ind[i] + mpd) \
+                    & (x[ind[i]] > x[ind] if kpsh else True)
+                idel[i] = 0  # Keep current peak
+        # remove the small peaks and sort back the indices by their occurrence
+        ind = np.sort(ind[~idel])
+
+    return ind
+
+
+def _picker(args, yh3, thr_type='P_threshold'):
+    """ 
+    Performs detection and picking.
+
+    Parameters
+    ----------
+    args : dic
+        A dictionary containing all of the input parameters.  
+        
+    yh1 : 1D array
+         probability. 
+
+    Returns
+    --------    
+    Ppickall: Pick.
+    Pproball: Pick Probability.                           
+                
+    """
+    P_PICKall=[]
+    Ppickall=[]
+    Pproball = []
+    perrorall=[]
+
+    sP_arr = _detect_peaks(yh3, mph=args[thr_type], mpd=1)
+
+    P_PICKS = []
+    pick_errors = []
+    if len(sP_arr) > 0:
+        P_uncertainty = None  
+
+        for pick in range(len(sP_arr)):        
+            sauto = sP_arr[pick]
+
+
+            if sauto: 
+                P_prob = np.round(yh3[int(sauto)], 3) 
+                P_PICKS.append([sauto,P_prob, P_uncertainty]) 
+
+    so=[]
+    si=[]
+    P_PICKS = np.array(P_PICKS)
+    P_PICKall.append(P_PICKS)
+    for ij in P_PICKS:
+        so.append(ij[1])
+        si.append(ij[0])
+    try:
+        so = np.array(so)
+        inds = np.argmax(so)
+        swave = si[inds]
+        Ppickall.append((swave))
+        Pproball.append((np.max(so)))
+    except:
+        Ppickall.append(None)
+        Pproball.append(None)
+
+    #print(np.shape(Ppickall))
+    #Ppickall = np.array(Ppickall)
+    #Pproball = np.array(Pproball)
+    
+    return Ppickall, Pproball
+
+
+def _resampling(st, antialias_lowpass_hz=45.0):
+    'perform resampling on Obspy stream objects'
+    
+    need_resampling = [tr for tr in st if tr.stats.sampling_rate != 100.0]
+    if len(need_resampling) > 0:
+       # print('resampling ...', flush=True)    
+        for indx, tr in enumerate(need_resampling):
+            if tr.stats.delta < 0.01:
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
+            tr.resample(100)
+            tr.stats.sampling_rate = 100
+            tr.stats.delta = 0.01
+            tr.data.dtype = 'int32'
+            st.remove(tr)                    
+            st.append(tr) 
+    return st 
+
+
+def _normalize(data, mode = 'max'):  
+    """ 
+    
+    Normalize 3D arrays.
+    
+    Parameters
+    ----------
+    data : 3D numpy array
+        3 component traces. 
+        
+    mode : str, default='std'
+        Mode of normalization. 'max' or 'std'     
+        
+    Returns
+    -------  
+    data : 3D numpy array
+        normalized data. 
+            
+    """  
+       
+    data -= np.mean(data, axis=0, keepdims=True)
+    if mode == 'max':
+        max_data = np.max(data, axis=0, keepdims=True)
+        assert(max_data.shape[-1] == data.shape[-1])
+        max_data[max_data == 0] = 1
+        data /= max_data              
+
+    elif mode == 'std':               
+        std_data = np.std(data, axis=0, keepdims=True)
+        assert(std_data.shape[-1] == data.shape[-1])
+        std_data[std_data == 0] = 1
+        data /= std_data
+    return data
+
+@ray.remote
+def mseed_predictor(input_dir='downloads_mseeds',
+              output_dir="detections",
+              P_threshold=0.1,
+              S_threshold=0.1, 
+              normalization_mode='std',
+              dt=1,
+              batch_size=500,              
+              overlap=0.3,
+              gpu_id=None,
+              gpu_limit=None,
+              overwrite=False,
+              log_queue=None,
+              stations2use=None,
+              stations_filters=None,
+              p_model=None,
+              s_model=None,
+              number_of_concurrent_station_predictions=None,
+              ray_cpus=None,
+              use_gpu=False,
+              gpu_memory_limit_mb=None,
+              total_vram_pool_mb=None,  # NEW: Total VRAM budget for all actors (aggregate cap)
+              testing_gpu=None,
+              test_csv_filepath=None,
+              specific_stations=None,
+              timechunk_id=None,
+              waveform_overlap=None,
+              total_timechunks=None,
+              number_of_concurrent_timechunk_predictions=None,
+              total_analysis_time=None,
+              intra_threads=None,
+              inter_threads=None, 
+              timechunk_dt=None,
+              # SeisBench model parameters
+              model_type='eqcct',
+              seisbench_parent_model=None,
+              seisbench_child_model=None,
+              Detection_threshold=0.3,
+              ram_safety_cap=None,
+              cudnn_headroom=0.20,
+              # Ripper mode - uses old task-based approach instead of ModelActors
+              ripper=False,
+              # CPU Ripper only: if True, do not clamp max_pending_tasks using the RAM heuristic
+              # (matches wide maxTasksQueue behavior in scmlpick; can OOM if set too high).
+              ripper_ignore_cpu_ram_cap=False,
+              # CPU ModelActor + CPU Ripper: skip RAM-budget caps (see ripper RAM branch and CPU actor pool).
+              ignore_cpu_ram_cap=False,
+              # If set, use this exact station order/count (deterministic benchmarks).
+              # Skips random.sample(stations2use) and specific_stations filtering.
+              fixed_station_list=None,
+              sequential_timechunk_specs=None,
+              waveform_filter_type='bandpass',
+              waveform_filter_freqmin=1.0,
+              waveform_filter_freqmax=45.0,
+              waveform_filter_corners=2,
+              waveform_filter_zerophase=True,
+              pick_output_format='xml',
+              ascii_station_pick_format='xml',
+              analysis_window_start_str=None,
+              analysis_window_end_str=None,
+              # Slipstream inside Model-Actor (SeisBench only; uses LeanPyTorchBackend in actor)
+              slipstream_inference: bool = False,
+              slipstream_dtype: str = 'bf16',
+              slipstream_compile: bool = False,
+              slipstream_overlap_samples: int = 0,
+              slipstream_batch_size: int = 256,
+              slipstream_cap_tasks_to_cpus: bool = True,
+              seisbench_overlap_samples=None):
+    
+    """ 
+    
+    To perform fast detection directly on mseed data.
+    
+    Parameters
+    ----------
+    input_dir: str
+        Directory name containing hdf5 and csv files-preprocessed data.
+            
+    input_model: str
+        Path to a trained model.
+            
+    stations_json: str
+        Path to a JSON file containing station information. 
+           
+    output_dir: str
+        Output directory that will be generated.
+            
+    P_threshold: float, default=0.1
+        A value which the P probabilities above it will be considered as P arrival.                
+            
+    S_threshold: float, default=0.1
+        A value which the S probabilities above it will be considered as S arrival.
+            
+    normalization_mode: str, default=std
+        Mode of normalization for data preprocessing max maximum amplitude among three components std standard deviation.
+             
+    batch_size: int, default=500
+        Batch size. This wont affect the speed much but can affect the performance. A value beteen 200 to 1000 is recommended.
+             
+    overlap: float, default=0.3
+        If set the detection and picking are performed in overlapping windows.
+             
+    gpu_id: int
+        Id of GPU used for the prediction. If using CPU set to None.        
+             
+    gpu_limit: float
+       Set the maximum percentage of memory usage for the GPU. 
+
+    cudnn_headroom: float, default=0.20
+        Percentage of GPU VRAM to reserve for cuDNN workspace overhead (0.0 to 0.80).
+        This prevents "DNN library is not found" errors during concurrent predictions.
+
+    overwrite: Bolean, default=False
+        Overwrite your results automatically.
+           
+    Returns
+    --------        
+      
+    """ 
+
+    # Set up logger that will write logs to this native process and add them to the log.queue to be added back to the main logger outside of this Raylet
+    # worker logger ships records to driver
+    logger = logging.getLogger("eqcctpro.worker")
+    logger.setLevel(logging.INFO)
+    logger.handlers[:] = []
+    logger.propagate = False
+    log_handler = QueueHandler(log_queue)
+    if log_queue is not None:
+        logger.addHandler(log_handler)  # Ray queue supports put()
+
+    if sequential_timechunk_specs:
+        _chunk_specs = list(sequential_timechunk_specs)
+    else:
+        _chunk_specs = [(input_dir, timechunk_id)]
+    if ripper and len(_chunk_specs) != 1:
+        raise ValueError(
+            "sequential_timechunk_specs is only for standard (ModelActor) multi-chunk runs; "
+            "use one mseed_predictor call per chunk for RIPPER, or pass a single chunk tuple."
+        )
+    input_dir, timechunk_id = _chunk_specs[0]
+
+    _log_prefix = _mseed_predictor_log_prefix(timechunk_id, input_dir)
+    logger = _ChunkLogAdapter(logger, {"prefix": _log_prefix})
+
+    # ===== RAM SAFETY CAP VALIDATION =====
+    if ram_safety_cap is not None:
+        if ram_safety_cap > 0.97:
+            logger.error(f"CRITICAL: ram_safety_cap ({ram_safety_cap:.2f}) exceeds the maximum allowed limit of 0.97. This is unsafe for system stability.")
+            logger.error("Please reduce ram_safety_cap to 0.97 or lower and try again. Exiting...")
+            sys.exit(1)
+        logger.info(f"RAM safety cap validated: {ram_safety_cap:.1%}")
+
+    # We set up the tf_environ again for the Raylets, who adopt their own import state and TF runtime when created. 
+    # We want to ensure that they are configured properly so that they won't die (bad)
+    skip_tf = (model_type.lower() != 'eqcct')
+    if not use_gpu: 
+        tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads, logger=logger, skip_tf=skip_tf)
+        # tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpu_id, intra_threads=intra_threads, inter_threads=inter_threads)
+
+    # ===== TIMING: Start tracking total trial time =====
+    trial_start_time = monotonic_s()
+
+    analysis_period_minutes = None
+    if total_analysis_time is not None:
+        try:
+            analysis_period_minutes = float(total_analysis_time.total_seconds()) / 60.0
+        except Exception:
+            analysis_period_minutes = None
+
+    _pick_norm = normalize_pick_output_format(pick_output_format)
+    _ascii_station_norm = (
+        normalize_ascii_station_pick_format(ascii_station_pick_format)
+        if _pick_norm == "ascii"
+        else "xml"
+    )
+
+    args = {
+    "input_dir": input_dir,
+    "log_chunk_prefix": _log_prefix,
+    "output_dir": output_dir,
+    "P_threshold": P_threshold,
+    "S_threshold": S_threshold,
+    "normalization_mode": normalization_mode,
+    "dt": dt,
+    "overlap": overlap,
+    "batch_size": batch_size,
+    "overwrite": overwrite, 
+    "gpu_id": gpu_id,
+    "gpu_limit": gpu_limit,
+    "p_model": p_model,
+    "s_model": s_model,
+    "stations_filters": stations_filters,
+    "model_type": model_type,
+    "seisbench_parent_model": seisbench_parent_model,
+    "seisbench_child_model": seisbench_child_model,
+    "Detection_threshold": Detection_threshold,
+    "waveform_filter_type": waveform_filter_type,
+    "waveform_filter_freqmin": waveform_filter_freqmin,
+    "waveform_filter_freqmax": waveform_filter_freqmax,
+    "waveform_filter_corners": waveform_filter_corners,
+    "waveform_filter_zerophase": waveform_filter_zerophase,
+    "pick_output_format": pick_output_format,
+    "ascii_station_pick_format": _ascii_station_norm,
+    "analysis_period_minutes": analysis_period_minutes,
+    "timechunk_id": timechunk_id,
+    "analysis_time_window_str": _format_analysis_time_window(
+        analysis_window_start_str,
+        analysis_window_end_str,
+        timechunk_id,
+        analysis_period_minutes,
+    ),
+    "picker_model_label": resolve_picker_model_label(
+        model_type, seisbench_parent_model, seisbench_child_model
+    ),
+    "slipstream_inference": bool(slipstream_inference),
+    "slipstream_dtype": str(slipstream_dtype),
+    "slipstream_compile": bool(slipstream_compile),
+    "slipstream_overlap_samples": int(slipstream_overlap_samples),
+    "slipstream_batch_size": int(slipstream_batch_size),
+    "seisbench_overlap_samples": (None if seisbench_overlap_samples is None else int(seisbench_overlap_samples)),
+    }
+    args["detection_confidence_threshold"] = format_detection_confidence_threshold_summary(args)
+
+    logger.info(f"------- Hardware Configuration -------")
+    try:
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(ray_cpus)  # ray_cpus should be a list of core IDs like [0, 1, 2]
+        logger.info(f"CPU affinity set to cores: {list(ray_cpus)}")
+        logger.info("")
+    except Exception as e:
+        logger.error(f"Failed to set CPU affinity. Reason: {e}")
+        logger.error("")
+        sys.exit(1)
+    
+    from eqcctpro.tools import build_station_list_from_dir
+
+    def _prepare_stations_tasks_for_chunk(c_input_dir, c_timechunk_id):
+        """Build ``tasks_predictor`` and related paths for one timechunk directory."""
+        args["input_dir"] = c_input_dir
+        args["timechunk_id"] = c_timechunk_id
+        lp = _mseed_predictor_log_prefix(c_timechunk_id, c_input_dir)
+        args["log_chunk_prefix"] = lp
+        args["analysis_time_window_str"] = _format_analysis_time_window(
+            analysis_window_start_str,
+            analysis_window_end_str,
+            c_timechunk_id,
+            analysis_period_minutes,
+        )
+        args["detection_confidence_threshold"] = format_detection_confidence_threshold_summary(
+            args
+        )
+        logger.extra["prefix"] = lp
+
+        _tcid_sum = c_timechunk_id
+        if _tcid_sum is None:
+            _cand_tc = os.path.basename(os.path.abspath(c_input_dir))
+            if "_" in _cand_tc and len(_cand_tc) >= 10:
+                _tcid_sum = _cand_tc
+
+        pick_leaf = "".join(
+            c if (c.isalnum() or c in "._-") else "_"
+            for c in str(_tcid_sum or "unknown_chunk")
+        )
+        base_output = os.path.join(os.getcwd(), str(args["output_dir"]))
+        out_dir_local = os.path.join(base_output, pick_leaf)
+        os.makedirs(out_dir_local, exist_ok=True)
+        logger.info(
+            "Picks for this timechunk will be written under %s (id=%s).",
+            out_dir_local,
+            _tcid_sum or pick_leaf,
+        )
+
+        try:
+            station_list_local = build_station_list_from_dir(args["input_dir"], logger=logger)
+        except Exception as e:
+            logger.info(f"{e}")
+            return None, None, None, None, None
+        logger.info(f"------- Data Preprocessing for EQCCTPro -------")
+        logger.info(f"{len(station_list_local)} station(s) in {args['input_dir']}")
+
+        st_list = station_list_local
+        if fixed_station_list is not None:
+            st_list = list(fixed_station_list)
+        elif stations2use and stations2use <= len(st_list):
+            st_list = random.sample(st_list, stations2use)
+
+        if specific_stations is not None and fixed_station_list is None:
+            st_list = [x for x in st_list if x in specific_stations]
+        logger.info(f"Using {len(st_list)} selected station(s): {st_list}.")
+
+        log_known_waveform_quality_issues(
+            _tcid_sum,
+            args["input_dir"],
+            st_list,
+            logger,
+        )
+        # Chunk-specific output directory: always one summary_results.ascii per folder.
+        _ascii_path = ascii_summary_results_path(
+            out_dir_local,
+            timechunk_id=None,
+            total_timechunks=1,
+        )
+        _pick_fmt0 = normalize_pick_output_format(pick_output_format)
+        if _pick_fmt0 == "ascii" and overwrite and os.path.isfile(_ascii_path):
+            try:
+                os.remove(_ascii_path)
+            except OSError:
+                pass
+
+        if not st_list or (
+            fixed_station_list is None and any(looks_like_timechunk_id(x) for x in st_list)
+        ):
+            st_list = build_station_list_from_dir(args["input_dir"], logger=logger)
+            logger.info(
+                "Station list rebuilt from directory because it contained a timechunk id or was empty."
+            )
+
+        t_pred = [
+            [f"({i+1}/{len(st_list)})", st_list[i], out_dir_local, args]
+            for i in range(len(st_list))
+        ]
+        if not t_pred:
+            return None, None, None, None, None
+        return t_pred, st_list, _ascii_path, _tcid_sum, out_dir_local
+
+    # =====================================================================
+    # RIPPER MODE: Use old task-based approach (model loaded per task)
+    # This bypasses ModelActors and allows more flexible GPU sharing.
+    #
+    # Scheduling matches scmlpick ``run_picker`` (bounded queue + ray.wait drain +
+    # backfill). Unlike ModelActor mode (1 actor per GPU with round-robin),
+    # ripper mode launches concurrent tasks that each load their own model.
+    # To prevent OOM, we limit in-flight tasks (max_pending_tasks) from VRAM/RAM.
+    #
+    # The same automatic Ray restart mechanism applies at EvaluateSystem level
+    # for OOM prevention between trials.
+    # =====================================================================
+    if ripper:
+        _prep = _prepare_stations_tasks_for_chunk(input_dir, timechunk_id)
+        if _prep[0] is None:
+            return
+        tasks_predictor, station_list, _ascii_summary_path, _tcid_for_summary, out_dir = _prep
+
+        # ===== TIMING: Ripper mode has no actor creation, just setup time =====
+        setup_start_time = monotonic_s()
+        
+        logger.info(f"===== RIPPER MODE ENABLED =====")
+        logger.info(f"Using old task-based approach (model loaded per task)")
+        logger.info(f"This allows more flexible GPU memory sharing but has model loading overhead.")
+        
+        model_type_lower = model_type.lower() if model_type else 'eqcct'
+        
+        # Calculate VRAM-aware concurrency limit for ripper mode
+        # Unlike ModelActor mode, ripper tasks each load their own model
+        # so we must limit concurrent tasks based on available VRAM
+        #
+        # IMPORTANT: We query ACTUAL free VRAM at runtime because:
+        # 1. User's max_vram_mb might be for multiple GPUs, but we're only using gpu_id subset
+        # 2. Other processes may be using GPU memory
+        # 3. Previous trials may not have fully released VRAM
+        if use_gpu and gpu_id:
+            # Get VRAM requirement per task using RIPPER-SPECIFIC estimates
+            # These use a single initialization multiplier (2.5×) instead of stacking buffers
+            # This accounts for: TF graph build, XLA compilation, cuDNN workspace, fragmentation
+            if model_type_lower == 'seisbench':
+                vram_per_task_mb = get_seisbench_model_vram_mb_ripper(
+                    seisbench_parent_model, seisbench_child_model, logger=logger)
+            else:
+                vram_per_task_mb = get_eqcct_vram_mb_ripper()
+            
+            # Calculate per-GPU user-defined VRAM budget
+            # max_vram_mb (total_vram_pool_mb) is the total across ALL GPUs in selected_gpus
+            # so we divide by the number of GPUs to get per-GPU budget
+            num_gpus = len(gpu_id) if isinstance(gpu_id, (list, tuple)) else 1
+            user_vram_per_gpu_mb = (total_vram_pool_mb / num_gpus) if total_vram_pool_mb else float('inf')
+            
+            # Query ACTUAL free VRAM from the GPU(s) at runtime using pynvml
+            # This prevents OOM when:
+            # - User specifies pool for multiple GPUs but only uses subset
+            # - Other processes are using GPU memory
+            # - Previous trials haven't fully released VRAM
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                actual_free_vram_mb = 0
+                for gpu_idx in gpu_id:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    actual_free_vram_mb += mem_info.free / (1024 * 1024)  # Convert bytes to MB
+                pynvml.nvmlShutdown()
+                logger.info(f"RIPPER VRAM CHECK: Actual free VRAM across {num_gpus} GPU(s): {actual_free_vram_mb:.0f} MB")
+            except Exception as e:
+                logger.warning(f"Could not query GPU VRAM via pynvml: {e}. Using user-defined pool.")
+                actual_free_vram_mb = user_vram_per_gpu_mb * num_gpus  # Fallback to user pool
+            
+            # Use the MINIMUM of: user-defined per-GPU budget OR actual free VRAM
+            # This prevents OOM when user overestimates available VRAM
+            effective_vram_pool = min(
+                user_vram_per_gpu_mb * num_gpus,  # User's total budget for these GPUs
+                actual_free_vram_mb               # Actual free VRAM on these GPUs
+            )
+            
+            # =====================================================================
+            # RIPPER-SPECIFIC CONCURRENCY HEADROOM
+            # =====================================================================
+            # The per-task VRAM multiplier (2.0× for EQCCT, 1.7× for PhaseNet) handles
+            # SINGLE-TASK overhead: TF/PyTorch init, graph build, cuDNN workspace.
+            #
+            # However, when many tasks run CONCURRENTLY, there's additional overhead from:
+            # - cuDNN workspace contention (multiple tasks allocating simultaneously)
+            # - Memory fragmentation from parallel allocations
+            # - CUDA context switching overhead
+            #
+            # Empirical testing on 2x 49GB GPUs (93100 MB pool) shows:
+            # - 0% headroom (13 tasks/GPU = 26 total): FAILS with cuDNN errors
+            # - 25% headroom (10 tasks/GPU = 20 total): WORKS but too conservative
+            # - 10% headroom (12 tasks/GPU = 24 total): Target balance
+            #
+            # This is NOT double-counting with the multiplier because:
+            # - Multiplier: Per-task initialization overhead
+            # - Concurrency headroom: Multi-task interference overhead
+            # =====================================================================
+            RIPPER_CONCURRENCY_HEADROOM = 0.10  # 10% reserved for concurrent task interference
+            usable_vram_mb = effective_vram_pool * (1.0 - RIPPER_CONCURRENCY_HEADROOM)
+            usable_vram_per_gpu_mb = usable_vram_mb / num_gpus
+            
+            # =====================================================================
+            # RIPPER CONCURRENCY CALCULATION
+            # =====================================================================
+            # vram_per_task_mb includes empirically-calibrated multiplier (2.0× for EQCCT)
+            # Plus 10% concurrency headroom for multi-task interference
+            # =====================================================================
+            
+            max_tasks_per_gpu = max(1, int(usable_vram_per_gpu_mb / vram_per_task_mb))
+            max_safe_concurrent = max_tasks_per_gpu * num_gpus
+            
+            # Cap max_pending_tasks to the VRAM-safe limit
+            requested_concurrency = number_of_concurrent_station_predictions
+            if requested_concurrency > max_safe_concurrent:
+                logger.warning(f"RIPPER VRAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
+                             f"but VRAM allows {max_safe_concurrent} "
+                             f"({max_tasks_per_gpu} tasks/GPU × {num_gpus} GPUs)")
+                max_pending_tasks = max_safe_concurrent
+            else:
+                max_pending_tasks = requested_concurrency
+            
+            # Calculate per-task VRAM limit for TensorFlow soft cap
+            # Each task gets its fair share of the GPU's usable VRAM
+            tasks_per_gpu = max(1, int((max_pending_tasks + num_gpus - 1) / num_gpus))  # Ceiling division
+            ripper_vram_limit_per_task_mb = int(usable_vram_per_gpu_mb / tasks_per_gpu)
+            
+            # Calculate the effective multiplier for logging
+            if model_type_lower == 'seisbench':
+                base_vram = SEISBENCH_MODEL_VRAM_MB.get(
+                    (seisbench_parent_model, seisbench_child_model), 500.0)
+                effective_multiplier = vram_per_task_mb / base_vram if base_vram > 0 else 2.0
+            else:
+                effective_multiplier = vram_per_task_mb / EQCCT_GPU_VRAM_MB
+            
+            logger.info(f"VRAM-aware concurrency: {max_pending_tasks} concurrent tasks "
+                       f"(User budget/GPU: {user_vram_per_gpu_mb:.0f} MB, Actual free: {actual_free_vram_mb:.0f} MB)")
+            logger.info(f"RIPPER VRAM ({effective_multiplier:.1f}× task multiplier + {RIPPER_CONCURRENCY_HEADROOM*100:.0f}% concurrency headroom): "
+                       f"{vram_per_task_mb:.0f} MB/task, Usable: {usable_vram_per_gpu_mb:.0f} MB/GPU → {max_tasks_per_gpu} tasks/GPU max")
+            logger.info(f"RIPPER VRAM SLICING: {tasks_per_gpu} tasks/GPU × {ripper_vram_limit_per_task_mb} MB/task "
+                       f"= {tasks_per_gpu * ripper_vram_limit_per_task_mb} MB/GPU (budget: {usable_vram_per_gpu_mb:.0f} MB/GPU)")
+            
+            # CRITICAL: Override gpu_memory_limit_mb with the computed per-task limit
+            # This ensures each Ripper task sets the correct TensorFlow soft memory cap
+            gpu_memory_limit_mb = ripper_vram_limit_per_task_mb
+        else:
+            # =====================================================================
+            # CPU RIPPER MODE: RAM-Aware Concurrency Limiting
+            # Similar to GPU mode, we query actual free RAM and cap concurrency
+            # to prevent OOM when many tasks load models simultaneously.
+            # =====================================================================
+            
+            # Get RAM requirement per task
+            if model_type_lower == 'seisbench':
+                ram_per_task_mb = get_seisbench_model_ram_mb(
+                    seisbench_parent_model, seisbench_child_model, use_gpu=False, logger=logger)
+            else:
+                ram_per_task_mb = get_eqcct_ram_mb(use_gpu=False)
+            
+            # Query actual free RAM using psutil (already imported at module level)
+            try:
+                mem_info = psutil.virtual_memory()
+                system_ram_total_mb = mem_info.total / (1024 * 1024)
+                actual_free_ram_mb = mem_info.available / (1024 * 1024)
+                logger.info(f"RIPPER RAM CHECK: Total RAM: {system_ram_total_mb:.0f} MB, Available: {actual_free_ram_mb:.0f} MB")
+            except Exception as e:
+                logger.warning(f"Could not query system RAM: {e}. Using unlimited concurrency.")
+                max_pending_tasks = number_of_concurrent_station_predictions
+                actual_free_ram_mb = None
+            
+            skip_ripper_cpu_ram_cap = ripper_ignore_cpu_ram_cap or ignore_cpu_ram_cap
+            if actual_free_ram_mb is not None and not skip_ripper_cpu_ram_cap:
+                # Budget = fraction of TOTAL installed RAM (same idea as get_available_ram_mb).
+                # Using only psutil.available * cap wrongly caps Ripper when much RAM is
+                # cached/freeable but not currently in the "available" counter — e.g. requesting
+                # 150 tasks while "available" implies ~140 tasks worth of headroom.
+                ripper_ram_cap = ram_safety_cap if ram_safety_cap is not None else 0.95
+                # Honors EQCCTPRO_RAM_BUDGET_MB so a parallel Ripper sweep is capped to its
+                # own RAM slice, not the whole machine.
+                usable_ram_mb = effective_ram_budget_mb(ripper_ram_cap)
+                max_safe_concurrent = max(1, int(usable_ram_mb / ram_per_task_mb))
+                
+                # Cap max_pending_tasks to the RAM-safe limit
+                requested_concurrency = number_of_concurrent_station_predictions
+                if requested_concurrency > max_safe_concurrent:
+                    logger.warning(
+                        f"RIPPER RAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
+                        f"but RAM budget only allows {max_safe_concurrent} "
+                        f"({ripper_ram_cap:.0%} of total {system_ram_total_mb:.0f} MB / {ram_per_task_mb:.0f} MB per task)"
+                    )
+                    max_pending_tasks = max_safe_concurrent
+                else:
+                    max_pending_tasks = requested_concurrency
+                
+                logger.info(
+                    f"RAM-aware concurrency: {max_pending_tasks} concurrent tasks "
+                    f"(Total RAM: {system_ram_total_mb:.0f} MB, budget {ripper_ram_cap:.0%} → {usable_ram_mb:.0f} MB, "
+                    f"currently available: {actual_free_ram_mb:.0f} MB, per-task estimate: {ram_per_task_mb:.0f} MB)"
+                )
+            elif skip_ripper_cpu_ram_cap:
+                requested_concurrency = number_of_concurrent_station_predictions
+                max_pending_tasks = max(1, int(requested_concurrency))
+                logger.warning(
+                    "RIPPER: ripper_ignore_cpu_ram_cap/ignore_cpu_ram_cap set; using requested concurrency %s without "
+                    "RAM-based clamp (scmlpick-style wide queues). Risk of OOM if concurrency exceeds physical RAM.",
+                    max_pending_tasks,
+                )
+        
+        # ===== TIMING: End of setup, start of processing =====
+        setup_end_time = monotonic_s()
+        setup_time_seconds = setup_end_time - setup_start_time
+        logger.info(f"Ripper mode setup completed in {setup_time_seconds:.2f} seconds")
+        
+        logger.info(f"Starting EQCCTPro parallelized waveform processing (RIPPER MODE)...") 
+        logger.info("")
+        start_time = monotonic_s() 
+        
+        if model_type_lower == 'seisbench':
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) [RIPPER] -------")
+        else:
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT [RIPPER] -------")
+
+        if timechunk_id is None:
+            cand = os.path.basename(input_dir)
+            if "_" in cand and len(cand) >= 10:
+                timechunk_id = cand
+            else:
+                raise ValueError("timechunk_id is None and could not be inferred from input_dir")
+        starttime, endtime, time_delta = parse_time_range(timechunk_id)
+
+        logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
+        logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
+
+        # scmlpick-style in-memory refs: one ray.put for the full Stream and one for args so each
+        # .remote() only ships ObjectRefs, not N copies of waveforms / config.
+        merged_stream, station_mseed_stats = _load_ripper_mseed_stream(
+            args["input_dir"], station_list, logger=logger
+        )
+        args["station_mseed_stats"] = station_mseed_stats
+        if len(merged_stream) == 0:
+            logger.warning(
+                "RIPPER: no traces preloaded from disk; tasks will read mSEED per station (no shared object store Stream)."
+            )
+            tasks_predictor_ripper = tasks_predictor
+        else:
+            logger.info(
+                f"RIPPER: ray.put shared Stream ({len(merged_stream)} trace(s)) and args for {len(station_list)} station task(s)."
+            )
+            args_ref = ray.put(args)
+            stream_ref = ray.put(merged_stream)
+            tasks_predictor_ripper = [
+                [f"({i+1}/{len(station_list)})", station_list[i], out_dir, args_ref, stream_ref]
+                for i in range(len(station_list))
+            ]
+
+        # Concurrent Prediction(s) Parallel Processing - RIPPER MODE
+        # Same scheduling pattern as scmlpick run_picker: seed queue, wait(1), backfill.
+        try:
+            def _ripper_submit_index(i: int):
+                if model_type_lower == "seisbench":
+                    if use_gpu is False:
+                        return ripper_parallel_predict_seisbench.remote(
+                            tasks_predictor_ripper[i],
+                            False,
+                            None,
+                            parent_model_name=seisbench_parent_model,
+                            child_model_name=seisbench_child_model,
+                            Detection_threshold=Detection_threshold,
+                        )
+                    gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
+                    return ripper_parallel_predict_seisbench.options(
+                        num_gpus=gpu_allocation_per_task, num_cpus=0
+                    ).remote(
+                        tasks_predictor_ripper[i],
+                        True,
+                        gpu_memory_limit_mb,
+                        parent_model_name=seisbench_parent_model,
+                        child_model_name=seisbench_child_model,
+                        Detection_threshold=Detection_threshold,
+                    )
+                if use_gpu is False:
+                    return ripper_parallel_predict_eqcct.remote(
+                        tasks_predictor_ripper[i], False, None
+                    )
+                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
+                return ripper_parallel_predict_eqcct.options(
+                    num_gpus=gpu_allocation_per_task, num_cpus=0
+                ).remote(tasks_predictor_ripper[i], True, gpu_memory_limit_mb)
+
+            model_load_times, waveform_load_times, ripper_task_timings, ripper_ascii_rows = _run_ripper_parallel_queue_scmlpick(
+                logger=logger,
+                tasks_predictor=tasks_predictor_ripper,
+                max_tasks_queue=max_pending_tasks,
+                submit_index=_ripper_submit_index,
+            )
+            if normalize_pick_output_format(pick_output_format) == "ascii":
+                merged = merge_ascii_summary_rows(_ascii_summary_path, ripper_ascii_rows)
+                write_ascii_run_summary(_ascii_summary_path, merged)
+                write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
+            logger.info("")
+            
+            # Calculate average model load time
+            if model_load_times:
+                avg_model_load_time = sum(model_load_times) / len(model_load_times)
+                logger.info(f"Average model load time (per task): {avg_model_load_time:.3f}s (across {len(model_load_times)} tasks)")
+            else:
+                avg_model_load_time = 0.0
+            
+            # Calculate average waveform load time
+            if waveform_load_times:
+                avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
+                logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+            else:
+                avg_waveform_load_time = 0.0
+
+        except Exception as e:
+            avg_model_load_time = 0.0  # Default if error occurs before collecting any times
+            avg_waveform_load_time = 0.0
+            ripper_task_timings = []
+            logger.error(f"ERROR in parallel processing (RIPPER MODE) at {datetime.now()}")
+            logger.error(f"Error: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+        logger.info(f"------- Parallel Station Waveform Processing Complete [RIPPER MODE] -------")
+        end_time = monotonic_s()
+        logger.info(f"Picks saved at {out_dir}. Process Runtime: {end_time - start_time:.2f} s")
+        total_trial_time_seconds = end_time - trial_start_time
+        if _pick_norm == "ascii":
+            _picks_root_rip = os.path.join(os.getcwd(), str(output_dir))
+            _exec_final = refresh_executive_picks_summary(
+                _picks_root_rip, total_trial_time_seconds=total_trial_time_seconds
+            )
+            if _exec_final:
+                logger.info(
+                    "Executive picks summary (final, includes total trial time): %s",
+                    _exec_final,
+                )
+
+        if testing_gpu is not None: 
+            num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
+            if timechunk_id:
+                starttime, endtime, time_delta = parse_time_range(timechunk_id)
+                timechunk_length_min = time_delta.total_seconds() / 60.0 if time_delta else None
+            else:
+                timechunk_length_min = None
+            if model_type_lower == 'seisbench':
+                model_used = f"{seisbench_parent_model}/{seisbench_child_model}"
+            else:
+                model_used = "eqcct"
+            
+            # Calculate timing metrics for ripper mode
+            waveform_processing_time_seconds = end_time - start_time
+
+            # ===== Per-task timing breakdown (mean across all station tasks) =====
+            _avg_timing = _avg_task_timings(ripper_task_timings)
+            _sum_timing = _sum_task_timings(ripper_task_timings)
+            _sum_compute = _sum_task_compute(ripper_task_timings)
+            _eff_conc = max(1, int(max_pending_tasks))
+            _sched_overhead = max(0.0, waveform_processing_time_seconds - (_sum_compute / _eff_conc))
+
+            trial_data = {
+                "Trial Number": None,
+                "Stations Used": str(station_list),
+                "Number of Stations Used": len(station_list),
+                "Number of CPUs Allocated for Ray to Use": num_ray_cpus,
+                "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
+                "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
+                "GPUs Used": json.dumps(list(gpu_id)) if (use_gpu and gpu_id is not None) else "[]",
+                "Inference Actor Memory Limit (MB)": float(gpu_memory_limit_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
+                "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
+                "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
+                "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
+                "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
+                "N ModelActors": 0,  # RIPPER mode doesn't use ModelActors
+                "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
+                "Actual Ripper Concurrent Tasks": int(max_pending_tasks),  # Actual concurrent tasks after VRAM/RAM limiting
+                # ===== TIMING METRICS =====
+                "Total Trial Time (s)": round(total_trial_time_seconds, 6),  # Entire trial: setup + processing
+                "Actor Creation Time (s)": "",  # N/A for RIPPER mode (no actors created)
+                "Total Run time for Picker (s)": round(waveform_processing_time_seconds, 6),  # Wall time of station-processing loop
+                # Per-task breakdown (Ripper loads the model inside each task)
+                "Avg Model Load Time (s)": round(avg_model_load_time, 6),
+                "Avg Preprocess Time (s)": round(_avg_timing["preprocess"], 6),
+                "Avg Inference Time (s)": round(_avg_timing["inference"], 6),
+                "Avg Pick Write Time (s)": round(_avg_timing["write"], 6),
+                "Avg Task Compute Time (s)": round(_avg_timing["compute"], 6),
+                "Sum Task Compute Time (s)": round(_sum_compute, 6),
+                "Task Scheduling Overhead (s)": round(_sched_overhead, 6),
+                "Waveform Processing Time (s)": round(avg_waveform_load_time, 6),  # legacy alias of Avg Preprocess Time
+                # Measured per-stage busy sums across all station tasks (Ripper
+                # pays model load + warmup inside every task).
+                "Warmup Time (s)": "",  # pool warmup N/A: Ripper warms up per task
+                "Sum Model Load Time (s)": round(_sum_timing["model_load"], 6),
+                "Sum Warmup Time (s)": round(_sum_timing["warmup"], 6),
+                "Sum Waveform Load Time (s)": round(_sum_timing["waveform"], 6),
+                "Sum Preprocess Time (s)": round(_sum_timing["preprocess"], 6),
+                "Sum Inference Time (s)": round(_sum_timing["inference"], 6),
+                "Sum Pick Write Time (s)": round(_sum_timing["write"], 6),
+                "Successful Inference Tasks": len(ripper_task_timings),
+                "Total Station Tasks": len(station_list),
+                "Model Used": model_used,
+                "Trial Success": "",
+                "Error Message": str(""),
+                "Comments": "[RIPPER MODE] Task-based approach (no ModelActors); scmlpick-style task queue",
+            }
+            append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
+            append_trial_result_json(
+                test_csv_filepath,
+                trial_data,
+                extra={
+                    "orchestration_strategy": ("ripper_slipstream" if slipstream_inference else "ripper"),
+                    "use_gpu": bool(use_gpu),
+                    "model_type": model_type_lower,
+                    "batch_size": (int(slipstream_batch_size) if slipstream_inference else None),
+                    "slipstream_dtype": (slipstream_dtype if slipstream_inference else None),
+                    "slipstream_compile": (bool(slipstream_compile) if slipstream_inference else None),
+                },
+            )
+            logger.info(f"Successfully saved trial data to {trial_results_json_path(test_csv_filepath)}")
+
+        return "Successfully ran EQCCTPro (RIPPER MODE), exiting..."
+    
+    # =====================================================================
+    # STANDARD MODE: Use ModelActor pool (new methodology)
+    # =====================================================================
+    all_waveform_load_times = []
+    all_task_timings: list = []
+    all_station_tasks_attempted = 0
+    waveform_processing_time_seconds = 0.0
+    actor_creation_done = False
+    warmup_time_seconds = 0.0
+
+    for chunk_idx, (c_input_dir, c_timechunk_id) in enumerate(_chunk_specs):
+        _prep_m = _prepare_stations_tasks_for_chunk(c_input_dir, c_timechunk_id)
+        if _prep_m[0] is None:
+            if len(_chunk_specs) == 1:
+                return
+            logger.warning(
+                "Skipping timechunk %s: could not build station task list.",
+                c_timechunk_id or c_input_dir,
+            )
+            continue
+        tasks_predictor, station_list, _ascii_summary_path, _tcid_for_summary, out_dir = _prep_m
+        input_dir = c_input_dir
+        timechunk_id = c_timechunk_id
+
+        if not actor_creation_done:
+            # ===== TIMING: Start tracking actor creation time =====
+            actor_creation_start_time = monotonic_s()
+    
+            # CREATE MODEL ACTOR(S) - Add this before the task loop
+            logger.info(f"Creating model actor(s)...") 
+    
+            model_type_lower = model_type.lower() if model_type else 'eqcct'
+            model_vram_mb = None  # Defensive init; will be set in GPU branches, remains None for CPU
+    
+            # Track requested vs actual actors for CSV Comments column
+            requested_concurrent_tasks = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            actor_cap_comment = ""  # Will be populated if actors are capped due to memory constraints
+    
+            # ===== cuDNN CONCURRENT PREDICTION LIMIT =====
+            # This tracks the maximum safe number of concurrent predictions based on GPU constraints.
+            # Key insight: cuDNN workspace memory is allocated dynamically during inference, and having
+            # too many concurrent predictions causes resource contention regardless of total actors.
+            # 
+            # safe_concurrent_predictions is set to safe_max_per_gpu (from a single GPU's perspective)
+            # in GPU branches, ensuring that concurrent predictions don't overwhelm cuDNN resources.
+            # For CPU mode, this remains at the user-requested value.
+            safe_concurrent_predictions = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+    
+            if model_type_lower == 'seisbench':
+                # --- Validate model name once on the driver (lightweight, no model loading) ---
+                # Actors will skip this network call (validate_pretrained=False) to avoid
+                # a thundering herd of concurrent list_pretrained() requests causing HTTP 500s.
+                logger.info(f"Validating SeisBench model name: {seisbench_parent_model}/{seisbench_child_model}...")
+                try:
+                    from eqcctpro.seisbench_models import SeisBenchModels
+                    SeisBenchModels(seisbench_parent_model, seisbench_child_model, validate_pretrained=True)
+                    logger.info("SeisBench model name validated successfully.")
+                except Exception as e:
+                    logger.warning(f"SeisBench model validation failed: {e}. Proceeding anyway, actors will attempt to load from cache.")
+
+                # Create SeisBench model actors
+                if use_gpu:
+                    # Get VRAM requirement for this SeisBench model
+                    model_vram_mb = get_seisbench_model_vram_mb(
+                        seisbench_parent_model, 
+                        seisbench_child_model,
+                        default_mb=2000.0
+                    )
+                    # Use max of requested VRAM or model requirement (similar to EQCCT logic)
+                    # gpu_memory_limit_mb is per-actor VRAM limit, model_vram_mb is the minimum requirement
+                    per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            
+                    # ===== MEMORY-AWARE GPU ACTOR CREATION =====
+                    # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+                    # The constraint is: total requested VRAM must not exceed available VRAM.
+                    # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
+                    n_gpus = len(gpu_id)
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get available VRAM (total pool)
+                    # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+                    # Otherwise fall back to actual free VRAM query
+                    available_vram_mb = get_available_vram_mb(
+                        gpu_ids=gpu_id, 
+                        max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
+                        logger=logger
+                    )
+            
+                    # Calculate max actors based on VRAM (memory constraint, not hardware count)
+                    max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
+            
+                    # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
+                    # IMPORTANT: Having too many concurrent TensorFlow/PyTorch processes on a single GPU 
+                    # causes cuDNN resource contention, resulting in:
+                    #   - "DNN library is not found"
+                    #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+                    #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+                    # 
+                    # Solution: Enforce a PER-GPU maximum, not just a global total.
+                    # cuDNN requires workspace memory beyond just model weights, and concurrent
+                    # operations compete for these resources.
+                    #
+                    # The formula scales dynamically with any model's VRAM requirements:
+                    #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+                    #
+                    # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+                    # cuDNN requires significant workspace memory for concurrent convolution operations.
+                    # The headroom provides efficient concurrent inference while minimizing OOM risk.
+                    # The headroom accounts for:
+                    #   1. cuDNN workspace memory that scales with concurrent operations
+                    #   2. CUDA context overhead for multiple processes
+                    #   3. Memory fragmentation during concurrent allocation/deallocation
+                    CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+                    safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+                    # Total max actors is per-GPU limit × number of GPUs
+                    max_actors_with_headroom = safe_max_per_gpu * n_gpus
+                    n_actors = min(requested_actors, max_actors_with_headroom)
+            
+                    # Cap concurrent predictions to the total safe actors across all GPUs.
+                    # This ensures we don't create "idle" actors that eat VRAM while others predict.
+                    safe_concurrent_predictions = max_actors_with_headroom
+            
+                    logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available GPUs: {n_gpus}")
+                    logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+                    logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
+                    logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+                    logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+                    logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+                    logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
+            
+                    # Calculate fractional GPU allocation so Ray knows these are GPU actors
+                    # 
+                    # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+                    # When n_actors > n_gpus, multiple actors must share one GPU.
+                    # 
+                    # Example of the BUG we're fixing:
+                    #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+                    #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+                    #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
+                    # 
+                    # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+                    # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+                    #   - actors_per_gpu = ceil(3/2) = 2
+                    #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+                    #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+                    # 
+                    GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            
+                    # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+                    # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+                    # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    # Calculate the fraction of GPU VRAM this model actually needs
+                    # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+                    MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
+            
+                    # Calculate how many actors might need to share a single GPU (worst case)
+                    actors_per_gpu = math.ceil(n_actors / n_gpus)
+            
+                    # Calculate max actors per GPU based on model-specific fractional constraint
+                    max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+                    # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+                    if actors_per_gpu > max_actors_per_single_gpu:
+                        # Reduce n_actors so that actors_per_gpu fits
+                        n_actors = max_actors_per_single_gpu * n_gpus
+                        actors_per_gpu = max_actors_per_single_gpu
+                        logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
+                                     f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+            
+                    # Calculate fractional GPU based on worst-case actors per GPU
+                    # This ensures all actors can be placed even if unevenly distributed
+                    fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+                    fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+                    fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
+            
+                    logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+                    logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
+                    logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+                    logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+                    logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} SeisBench/Slipstream Model-Actor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
+                    model_actors = _create_seisbench_model_actors(
+                        n_actors,
+                        parent_model_name=seisbench_parent_model,
+                        child_model_name=seisbench_child_model,
+                        use_gpu=True,
+                        gpus_to_use=gpu_id,
+                        fractional_gpu=fractional_gpu,
+                        slipstream_inference=slipstream_inference,
+                        slipstream_dtype=slipstream_dtype,
+                        slipstream_compile=slipstream_compile,
+                        slipstream_overlap_samples=slipstream_overlap_samples,
+                        slipstream_batch_size=slipstream_batch_size,
+                        logger=logger,
+                    )
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
+                else:
+                    # ===== MEMORY-AWARE CPU ACTOR CREATION =====
+                    # KEY INSIGHT: The constraint is RAM, not CPU count.
+                    # taskset already limits CPU visibility, so let Ray handle scheduling.
+                    n_cpus = len(ray_cpus) if ray_cpus else 1
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get RAM requirement for this model
+                    model_ram_mb = get_seisbench_model_ram_mb(
+                        seisbench_parent_model,
+                        seisbench_child_model,
+                        use_gpu=False,
+                        default_mb=600.0
+                    )
+            
+                    # Get available RAM based on system capacity
+                    # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+                    available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+                    # Calculate max actors based on RAM (memory constraint)
+                    max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+                    if ignore_cpu_ram_cap:
+                        n_actors = max(1, requested_actors)
+                        logger.warning(
+                            "ignore_cpu_ram_cap=True: creating %s SeisBenchModelActor(s) without RAM-based cap "
+                            "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                            n_actors, requested_actors, max(1, max_actors_by_ram),
+                        )
+                    else:
+                        n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+                    logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available CPUs: {n_cpus}")
+                    logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+                    logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+                    logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by RAM, not CPU count.")
+                    logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} SeisBench/Slipstream Model-Actor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
+                    model_actors = _create_seisbench_model_actors(
+                        n_actors,
+                        parent_model_name=seisbench_parent_model,
+                        child_model_name=seisbench_child_model,
+                        use_gpu=False,
+                        gpus_to_use=False,
+                        slipstream_inference=slipstream_inference,
+                        slipstream_dtype=slipstream_dtype,
+                        slipstream_compile=slipstream_compile,
+                        slipstream_overlap_samples=slipstream_overlap_samples,
+                        slipstream_batch_size=slipstream_batch_size,
+                        logger=logger,
+                    )
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
+            else:
+                # Create EQCCT model actors
+                if use_gpu:
+                    # ===== MEMORY-AWARE GPU ACTOR CREATION (EQCCT/TensorFlow) =====
+                    # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+                    # The constraint is: total requested VRAM must not exceed available VRAM.
+                    # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
+                    model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
+                    # gpu_memory_limit_mb is per-actor VRAM limit for TF config, model_vram_mb is the minimum requirement
+                    per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            
+                    n_gpus = len(gpu_id)
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get available VRAM (total pool)
+                    # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+                    # Otherwise fall back to actual free VRAM query
+                    available_vram_mb = get_available_vram_mb(
+                        gpu_ids=gpu_id, 
+                        max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
+                        logger=logger
+                    )
+            
+                    # Calculate max actors based on VRAM (memory constraint, not hardware count)
+                    max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
+            
+                    # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
+                    # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+                    # causes cuDNN resource contention, resulting in:
+                    #   - "DNN library is not found"
+                    #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+                    #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+                    # 
+                    # Solution: Enforce a PER-GPU maximum, not just a global total.
+                    # cuDNN requires workspace memory beyond just model weights, and concurrent
+                    # operations compete for these resources.
+                    #
+                    # The formula scales dynamically with any model's VRAM requirements:
+                    #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+                    #
+                    # Example: EQCCT with 46550 MB/GPU, 2756 MB/actor:
+                    #   theoretical = 46550 / 2756 = 16.9 actors/GPU
+                    #   safe_max = floor(16.9 * 0.90) = 15 actors/GPU (with 10% headroom)
+                    #
+                    # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+                    # cuDNN requires significant workspace memory for concurrent convolution operations.
+                    # Empirically tested values:
+                    #   - 0.90 (10% headroom): Efficient concurrent inference
+                    #   - 0.88 (12% headroom): Previously tested for stability
+                    #   - 0.75 (25% headroom): Extremely conservative
+                    # The headroom accounts for:
+                    #   1. cuDNN workspace memory that scales with concurrent operations
+                    #   2. CUDA context overhead for multiple processes
+                    #   3. Memory fragmentation during concurrent allocation/deallocation
+                    CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+                    safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+                    # Total max actors is per-GPU limit × number of GPUs
+                    max_actors_with_headroom = safe_max_per_gpu * n_gpus
+                    n_actors = min(requested_actors, max_actors_with_headroom)
+            
+                    # Cap concurrent predictions to the total safe actors across all GPUs.
+                    # This ensures we don't create "idle" actors that eat VRAM while others predict.
+                    safe_concurrent_predictions = max_actors_with_headroom
+            
+                    logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available GPUs: {n_gpus}")
+                    logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+                    logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
+                    logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+                    logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+                    logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+                    logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
+                    logger.info(f"Creating {n_actors} ModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
+            
+                    # Calculate fractional GPU allocation so Ray knows these are GPU actors
+                    # 
+                    # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+                    # When n_actors > n_gpus, multiple actors must share one GPU.
+                    # 
+                    # Example of the BUG we're fixing:
+                    #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+                    #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+                    #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
+                    # 
+                    # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+                    # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+                    #   - actors_per_gpu = ceil(3/2) = 2
+                    #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+                    #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+                    # 
+                    GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            
+                    # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+                    # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+                    # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    # Calculate the fraction of GPU VRAM this model actually needs
+                    # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+                    MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
+            
+                    # Calculate how many actors might need to share a single GPU (worst case)
+                    actors_per_gpu = math.ceil(n_actors / n_gpus)
+            
+                    # Calculate max actors per GPU based on model-specific fractional constraint
+                    max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+                    # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+                    if actors_per_gpu > max_actors_per_single_gpu:
+                        # Reduce n_actors so that actors_per_gpu fits
+                        n_actors = max_actors_per_single_gpu * n_gpus
+                        actors_per_gpu = max_actors_per_single_gpu
+                        logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
+                                     f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+            
+                    # Calculate fractional GPU based on worst-case actors per GPU
+                    # This ensures all actors can be placed even if unevenly distributed
+                    fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+                    fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+                    fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
+            
+                    logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+                    logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
+                    logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+                    logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+                    logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
+                    model_actors = [
+                        ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+                            gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
+                            p_model_path=p_model, 
+                            s_model_path=s_model, 
+                            gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
+                            use_gpu=True
+                        ) for _ in range(n_actors)
+                    ]
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize ModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
+                    logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
+                else:
+                    # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
+                    # KEY INSIGHT: The constraint is RAM, not CPU count.
+                    # taskset already limits CPU visibility, so let Ray handle scheduling.
+                    n_cpus = len(ray_cpus) if ray_cpus else 1
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get RAM requirement for EQCCT in CPU mode
+                    model_ram_mb = get_eqcct_ram_mb(use_gpu=False)
+            
+                    # Get available RAM based on system capacity
+                    # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+                    available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+                    # Calculate max actors based on RAM (memory constraint)
+                    max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+                    if ignore_cpu_ram_cap:
+                        n_actors = max(1, requested_actors)
+                        logger.warning(
+                            "ignore_cpu_ram_cap=True: creating %s ModelActor(s) without RAM-based cap "
+                            "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                            n_actors, requested_actors, max(1, max_actors_by_ram),
+                        )
+                    else:
+                        n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+                    logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL (EQCCT) =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available CPUs: {n_cpus}")
+                    logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+                    logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+                    logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+                    logger.info(f"Creating {n_actors} ModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by RAM, not CPU count.")
+                    logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
+                    model_actors = [
+                        ModelActor.remote(
+                            p_model_path=p_model, 
+                            s_model_path=s_model, 
+                            gpu_memory_limit_mb=None, 
+                            use_gpu=False
+                        ) for _ in range(n_actors)
+                    ]
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize ModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
+
+            # ===== TIMING: End of actor creation =====
+            actor_creation_end_time = monotonic_s()
+            actor_creation_time_seconds = actor_creation_end_time - actor_creation_start_time
+            logger.info(f"Actor creation completed in {actor_creation_time_seconds:.2f} seconds")
+            actor_creation_done = True
+
+            # ===== TIMING: pool warmup (measured wall, its own stage) =====
+            # One dummy forward per actor pays CUDA init / autotune / compile
+            # up front so per-task inference times measure the steady state.
+            # SeisBench/Slipstream actors expose warmup(); TF ModelActors do not.
+            warmup_time_seconds = 0.0
+            if model_actors and (model_type or "").lower() == "seisbench":
+                _warm_start = monotonic_s()
+                try:
+                    ray.get([actor.warmup.remote() for actor in model_actors])
+                    warmup_time_seconds = monotonic_s() - _warm_start
+                    logger.info(f"Actor warmup completed in {warmup_time_seconds:.2f} seconds")
+                except Exception as e:
+                    warmup_time_seconds = monotonic_s() - _warm_start
+                    logger.warning(f"Actor warmup failed (continuing): {e}")
+        elif len(_chunk_specs) > 1:
+            logger.info(
+                "Reusing %s ModelActor(s) for sequential timechunk %s (%s/%s).",
+                len(model_actors),
+                timechunk_id,
+                chunk_idx + 1,
+                len(_chunk_specs),
+            )
+
+
+        # Submit tasks to ray in a queue
+        tasks_queue = []
+    
+        # Cap max_pending_tasks to safe_concurrent_predictions to prevent cuDNN resource contention
+        # This ensures that even with multiple actors/GPUs, we don't overwhelm cuDNN workspace allocation
+        if number_of_concurrent_station_predictions > safe_concurrent_predictions:
+            logger.info(f"cuDNN PREDICTION LIMIT: Capping concurrent predictions from {number_of_concurrent_station_predictions} to {safe_concurrent_predictions}")
+            logger.info(f"  → Actors created: {len(model_actors)} across {len(gpu_id) if use_gpu else 0} GPU(s)")
+            logger.info(f"  → Max concurrent predictions: {safe_concurrent_predictions} (total safe system limit)")
+            logger.info(f"  → Tasks will queue and execute as actors become available")
+            max_pending_tasks = safe_concurrent_predictions
+        else:
+            max_pending_tasks = number_of_concurrent_station_predictions
+
+        # Slipstream CPU: cap in-flight station tasks to the Ray CPU budget so
+        # "Avg Inference Time" is not inflated by 68 workers queueing on ~20 cores.
+        # Oversubscription studies disable this (slipstream_cap_tasks_to_cpus=False)
+        # to deliberately run more in-flight tasks than cores, RAM permitting.
+        if (
+            slipstream_cap_tasks_to_cpus
+            and slipstream_inference
+            and not use_gpu
+            and (model_type or "").lower() == "seisbench"
+            and max_pending_tasks > 1
+        ):
+            cpu_slots = max(1, len(ray_cpus) if ray_cpus else 1)
+            if max_pending_tasks > cpu_slots:
+                logger.info(
+                    "SLIPSTREAM CPU: capping concurrent station tasks from %s to %s "
+                    "(match --max-cpus / taskset; reduces Ray queue wait in inference timing).",
+                    max_pending_tasks,
+                    cpu_slots,
+                )
+                max_pending_tasks = cpu_slots
+    
+        logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
+        logger.info("")
+        start_time = monotonic_s() 
+        model_type_lower = model_type.lower() if model_type else 'eqcct'
+        if model_type_lower == 'seisbench':
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
+        else:
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
+
+        if timechunk_id is None:
+            # derive from the path if caller forgot to pass it
+            cand = os.path.basename(input_dir)
+            if "_" in cand and len(cand) >= 10:
+                timechunk_id = cand
+            else:
+                raise ValueError("timechunk_id is None and could not be inferred from input_dir; "
+                                "expected a dir named like YYYYMMDDThhmmssZ_YYYYMMDDThhmmssZ")
+        starttime, endtime, time_delta = parse_time_range(timechunk_id)
+
+        logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
+        logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
+        all_station_tasks_attempted += len(tasks_predictor)
+
+        # scmlpick-style shared refs: one copy of waveforms + args in the object store (same as RIPPER).
+        station_codes_for_stream = [tasks_predictor[i][1] for i in range(len(tasks_predictor))]
+        merged_stream_ma, station_mseed_stats = _load_ripper_mseed_stream(
+            args["input_dir"], station_codes_for_stream, logger=logger
+        )
+        args["station_mseed_stats"] = station_mseed_stats
+        if len(merged_stream_ma) == 0:
+            logger.warning(
+                "ModelActor mode: no traces preloaded; tasks will read mSEED from disk per station."
+            )
+            tasks_predictor_ma = tasks_predictor
+        else:
+            logger.info(
+                f"ModelActor mode: ray.put shared Stream ({len(merged_stream_ma)} trace(s)) and args for "
+                f"{len(tasks_predictor)} station task(s)."
+            )
+            args_ref_ma = ray.put(args)
+            stream_ref_ma = ray.put(merged_stream_ma)
+            tasks_predictor_ma = [
+                [tasks_predictor[i][0], tasks_predictor[i][1], tasks_predictor[i][2], args_ref_ma, stream_ref_ma]
+                for i in range(len(tasks_predictor))
+            ]
+
+        # ===== TIMING: Collect waveform load times + per-task breakdown for averaging =====
+        waveform_load_times = []
+        task_timings: list = []
+        ascii_summary_rows: list = []
+
+        # Concurrent Prediction(s) Parallel Processing
+        try: 
+            for i in range(len(tasks_predictor_ma)):
+                while True:
+                    # Add new task to queue while max is not reached
+                    if len(tasks_queue) < max_pending_tasks:
+                        # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
+                        model_actor = model_actors[i % len(model_actors)]
+
+                        # Route to appropriate prediction function based on model type
+                        if model_type_lower == 'seisbench':
+                            # SeisBench models use parallel_predict_seisbench
+                            if use_gpu is False:
+                                tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
+                            elif use_gpu is True:
+                                # Don't allocate GPUs to workers, only to model actors
+                                # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                                tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
+                        else:
+                            # EQCCT models use parallel_predict (original)
+                            if use_gpu is False:
+                                tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
+                            elif use_gpu is True:
+                                # Don't allocate GPUs to workers, only to model actors
+                                # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                                tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
+                        break
+                    # If there are more tasks than maximum, just process them
+                    else:
+                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                        for finished_task in tasks_finished:
+                            result = ray.get(finished_task)
+                            log_entry, load_time, ascii_row, task_timing = _unpack_modelactor_predict_result(
+                                result
+                            )
+                            logger.info(f'{log_entry}')
+                            if load_time is not None:
+                                waveform_load_times.append(load_time)
+                            if task_timing is not None:
+                                task_timings.append(task_timing)
+                            if ascii_row is not None:
+                                ascii_summary_rows.append(ascii_row)
+
+            # After adding all the tasks to queue, process what's left
+            while tasks_queue:
+                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                for finished_task in tasks_finished:
+                    result = ray.get(finished_task)
+                    log_entry, load_time, ascii_row, task_timing = _unpack_modelactor_predict_result(
+                        result
+                    )
+                    logger.info(f'{log_entry}')
+                    if load_time is not None:
+                        waveform_load_times.append(load_time)
+                    if task_timing is not None:
+                        task_timings.append(task_timing)
+                    if ascii_row is not None:
+                        ascii_summary_rows.append(ascii_row)
+            logger.info("")
+        
+            # Calculate average waveform load time
+            if waveform_load_times:
+                avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
+                logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+            else:
+                avg_waveform_load_time = 0.0
+
+            if normalize_pick_output_format(pick_output_format) == "ascii":
+                merged = merge_ascii_summary_rows(_ascii_summary_path, ascii_summary_rows)
+                write_ascii_run_summary(_ascii_summary_path, merged)
+                write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
+
+        except Exception as e:
+            avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
+            # Catch any error in the parallel processing
+            logger.error(f"ERROR in parallel processing at {datetime.now()}")
+            logger.error(f"Error: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise  # Re-raise to see the error
+
+        logger.info(f"------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------")
+        end_time = monotonic_s()
+        logger.info(f"Picks saved at {out_dir} Process Runtime: {end_time - start_time:.2f} s")
+        all_waveform_load_times.extend(waveform_load_times)
+        all_task_timings.extend(task_timings)
+        waveform_processing_time_seconds += end_time - start_time
+
+    if not actor_creation_done:
+        logger.error("No timechunk produced station tasks in ModelActor mode; exiting.")
+        return
+
+    end_time = monotonic_s()
+    total_trial_time_seconds = end_time - trial_start_time
+    if all_waveform_load_times:
+        avg_waveform_load_time = sum(all_waveform_load_times) / len(all_waveform_load_times)
+    else:
+        avg_waveform_load_time = 0.0
+
+    if testing_gpu is not None: 
+        # Guard: make sure CPUs is an int, not a list
+        num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
+
+        # Parse the timechunk_id to get start/end times
+        if timechunk_id:
+            starttime, endtime, time_delta = parse_time_range(timechunk_id)
+            timechunk_length_min = time_delta.total_seconds() / 60.0 if time_delta else None
+        else:
+            timechunk_length_min = None
+
+        # Determine model name for logging
+        if model_type_lower == 'seisbench':
+            model_used = f"{seisbench_parent_model}/{seisbench_child_model}"
+        else:
+            model_used = "eqcct"
+
+        # N ModelActors = actual actors created (capped to hardware limits)
+        # This may be less than number_of_concurrent_station_predictions due to optimal capping
+        actual_actors = len(model_actors) if model_actors else 1
+
+        # ===== Per-task timing breakdown (mean across all station tasks) =====
+        _avg_timing = _avg_task_timings(all_task_timings)
+        _sum_timing = _sum_task_timings(all_task_timings)
+        _sum_compute = _sum_task_compute(all_task_timings)
+        _eff_conc = max(1, int(actual_actors))
+        _sched_overhead = max(0.0, waveform_processing_time_seconds - (_sum_compute / _eff_conc))
+
+        # total_trial_time_seconds: final wall clock from trial_start_time (set above)
+        trial_data = {
+            "Trial Number": None,  # Will be auto-filled by append_trial_row
+            "Stations Used": str(station_list),
+            "Number of Stations Used": len(station_list),
+            "Number of CPUs Allocated for Ray to Use": num_ray_cpus,
+            "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
+            "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
+            "GPUs Used": json.dumps(list(gpu_id)) if (use_gpu and gpu_id is not None) else "[]",
+            "Inference Actor Memory Limit (MB)": float(model_vram_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
+            "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
+            "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
+            "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
+            "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
+            "N ModelActors": actual_actors,  # Actual actors created (capped to hardware/memory)
+            "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
+            # ===== TIMING METRICS =====
+            "Total Trial Time (s)": round(total_trial_time_seconds, 6),  # Entire trial: setup + actor creation + processing
+            "Actor Creation Time (s)": round(actor_creation_time_seconds, 6),  # Time to spin up ModelActors
+            "Total Run time for Picker (s)": round(waveform_processing_time_seconds, 6),  # Wall time of station-processing loop
+            # Per-task breakdown (models loaded once in the actor, so per-task model load is 0)
+            "Avg Model Load Time (s)": round(_avg_timing["model_load"], 6),
+            "Avg Preprocess Time (s)": round(_avg_timing["preprocess"], 6),
+            "Avg Inference Time (s)": round(_avg_timing["inference"], 6),
+            "Avg Pick Write Time (s)": round(_avg_timing["write"], 6),
+            "Avg Task Compute Time (s)": round(_avg_timing["compute"], 6),
+            "Sum Task Compute Time (s)": round(_sum_compute, 6),
+            "Task Scheduling Overhead (s)": round(_sched_overhead, 6),
+            "Waveform Processing Time (s)": round(avg_waveform_load_time, 6),  # legacy alias of Avg Preprocess Time
+            # Measured pool warmup wall + per-stage busy sums across all tasks.
+            "Warmup Time (s)": round(warmup_time_seconds, 6),
+            "Sum Model Load Time (s)": round(_sum_timing["model_load"], 6),
+            "Sum Warmup Time (s)": round(_sum_timing["warmup"], 6),
+            "Sum Waveform Load Time (s)": round(_sum_timing["waveform"], 6),
+            "Sum Preprocess Time (s)": round(_sum_timing["preprocess"], 6),
+            "Sum Inference Time (s)": round(_sum_timing["inference"], 6),
+            "Sum Pick Write Time (s)": round(_sum_timing["write"], 6),
+            "Successful Inference Tasks": len(all_task_timings),
+            "Total Station Tasks": all_station_tasks_attempted,
+            "Model Used": model_used,
+            "Trial Success": "",
+            "Error Message": str(""),
+            "Comments": (
+                (f"[Slipstream in Model-Actor] dtype={slipstream_dtype}, compile={slipstream_compile}; "
+                 if slipstream_inference else "")
+                + (actor_cap_comment or "")
+            ),
+        }
+            
+        append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
+        append_trial_result_json(
+            test_csv_filepath,
+            trial_data,
+            extra={
+                "orchestration_strategy": ("modelactor_slipstream" if slipstream_inference else "modelactor"),
+                "use_gpu": bool(use_gpu),
+                "model_type": model_type_lower,
+                "batch_size": (int(slipstream_batch_size) if slipstream_inference else None),
+                "slipstream_dtype": (slipstream_dtype if slipstream_inference else None),
+                "slipstream_compile": (bool(slipstream_compile) if slipstream_inference else None),
+            },
+        )
+        logger.info(f"Successfully saved trial data to {trial_results_json_path(test_csv_filepath)}")
+
+    if _pick_norm == "ascii":
+        _picks_root_ma = os.path.join(os.getcwd(), str(output_dir))
+        _exec_ma = refresh_executive_picks_summary(
+            _picks_root_ma, total_trial_time_seconds=total_trial_time_seconds
+        )
+        if _exec_ma:
+            logger.info(
+                "Executive picks summary (final, includes total trial time): %s",
+                _exec_ma,
+            )
+
+    return "Successfully ran EQCCTPro, exiting..."
+
+
+@ray.remote
+class ModelActor:
+    def __init__(self,  p_model_path, s_model_path, gpus_to_use=False, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
+        self.logger = logging.getLogger("eqcctpro.model_actor")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers[:] = []
+        self.logger.propagate = False
+        self.logger.addHandler(logging.StreamHandler())
+
+        self.logger.info("=== ModelActor __init__ STARTED ===")
+        self.logger.info(f"p_model_path = {p_model_path}")
+        self.logger.info(f"s_model_path = {s_model_path}")
+        self.logger.info(f"Exists? P: {os.path.exists(p_model_path)}, S: {os.path.exists(s_model_path)}")
+
+        if use_gpu:
+            # Configure GPU memory for this actor
+            # We want one GPU per actor 
+            try:
+                self.logger.info("Calling tf_environ...")
+                tf_environ(
+                    gpu_id=gpus_to_use[0] if gpus_to_use else 0, 
+                    gpus_to_use=None, # First visible GPU only
+                    vram_limit_mb=gpu_memory_limit_mb,
+                    intra_threads=intra_threads,
+                    inter_threads=inter_threads,
+                    log_device=True,
+                    logger=self.logger)
+                self.logger.info("tf_environ finished.")
+            except (RuntimeError, ValueError) as e:
+                self.logger.error(f"[ModelActor] Error setting memory limit: {e}")
+        
+        # Load the model once
+        self.logger.info("Importing/load_eqcct_model...")
+        from eqcctpro.eqcct_tf_models import load_eqcct_model
+        self.model = load_eqcct_model(p_model_path, s_model_path)
+        self.logger.info("Model loaded.")
+    
+    def ready(self):
+        """Simple method to check if the actor is ready"""
+        return True
+    
+    def predict(self, data_generator):
+        """Perform prediction using the loaded model"""
+        return self.model.predict(data_generator, verbose=0)
+    
+    def predict_from_arrays(self, trace_start_time, data_set, batch_size, norm_mode):
+        from eqcctpro.eqcct_tf_models import PreLoadGeneratorTest
+        pred_generator = PreLoadGeneratorTest(trace_start_time, data_set,
+                                            batch_size=batch_size, norm_mode=norm_mode)
+        return self.model.predict(pred_generator, verbose=0)
+
+
+def _create_seisbench_model_actors(
+    n_actors: int,
+    *,
+    parent_model_name: str,
+    child_model_name: str,
+    use_gpu: bool,
+    gpus_to_use,
+    fractional_gpu: float = None,
+    slipstream_inference: bool = False,
+    slipstream_dtype: str = "bf16",
+    slipstream_compile: bool = False,
+    slipstream_overlap_samples: int = 0,
+    slipstream_batch_size: int = 256,
+    logger=None,
+):
+    """Create SeisBench or Slipstream Model-Actor Ray workers."""
+    if slipstream_inference:
+        from eqcctpro.slipstream_actor import SlipstreamSeisBenchModelActor
+
+        actor_cls = SlipstreamSeisBenchModelActor
+        remote_kwargs = dict(
+            parent_model_name=parent_model_name,
+            child_model_name=child_model_name,
+            gpus_to_use=gpus_to_use,
+            use_gpu=use_gpu,
+            slipstream_dtype=slipstream_dtype,
+            slipstream_compile=slipstream_compile,
+            overlap_samples=slipstream_overlap_samples,
+            lean_batch_size=slipstream_batch_size,
+        )
+        label = f"SlipstreamSeisBenchModelActor(dtype={slipstream_dtype}, compile={slipstream_compile})"
+    else:
+        actor_cls = SeisBenchModelActor
+        remote_kwargs = dict(
+            parent_model_name=parent_model_name,
+            child_model_name=child_model_name,
+            gpus_to_use=gpus_to_use,
+            use_gpu=use_gpu,
+        )
+        label = "SeisBenchModelActor(classify)"
+
+    if logger:
+        logger.info("Creating %s %s(s)...", n_actors, label)
+
+    actors = []
+    for _ in range(n_actors):
+        if use_gpu and fractional_gpu is not None:
+            actors.append(
+                actor_cls.options(num_gpus=fractional_gpu, num_cpus=0).remote(**remote_kwargs)
+            )
+        else:
+            actors.append(actor_cls.remote(**remote_kwargs))
+    return actors
+
+
+@ray.remote
+class SeisBenchModelActor:
+    """
+    Ray actor for SeisBench models that loads the model once and shares it across predictions.
+    Similar to ModelActor but for SeisBench models (PyTorch-based).
+    """
+    def __init__(self, parent_model_name, child_model_name, gpus_to_use=False, use_gpu=True):
+        self.logger = logging.getLogger("eqcctpro.seisbench_model_actor")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers[:] = []
+        self.logger.propagate = False
+        self.logger.addHandler(logging.StreamHandler())
+
+        self.logger.info("=== SeisBenchModelActor __init__ STARTED ===")
+        self.logger.info(f"parent_model_name = {parent_model_name}")
+        self.logger.info(f"child_model_name = {child_model_name}")
+        self.use_gpu = use_gpu
+        self.gpus_to_use = gpus_to_use
+
+        # Set device for PyTorch (SeisBench uses PyTorch)
+        try:
+            import torch
+        except ImportError:
+            self.logger.error("PyTorch (torch) is not installed. SeisBench models require PyTorch.")
+            raise ImportError("PyTorch (torch) is not installed. Please install it to use SeisBench models.")
+
+        if use_gpu:
+            # When using Ray with num_gpus=1, the assigned GPU is always visible as cuda:0
+            # regardless of its physical ID (0, 1, etc.) because Ray sets CUDA_VISIBLE_DEVICES.
+            self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+            self.logger.info(f"Using device: {self.device} (mapped by Ray from physical {gpus_to_use})")
+        else:
+            self.device = torch.device('cpu')
+            self.logger.info("Using CPU device")
+
+        # Load the SeisBench model (skip validation — driver already verified the model name)
+        self.logger.info("Loading SeisBench model...")
+        from eqcctpro.seisbench_models import SeisBenchModels
+        self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
+        self.model_wrapper.load_model()
+
+        # Move model to device if using GPU
+        if use_gpu:
+            try:
+                if hasattr(self.model_wrapper.model, 'to'):
+                    self.model_wrapper.model.to(self.device)
+                cuda_synchronize_best_effort()
+                self.logger.info(f"Model moved to {self.device}")
+            except Exception as e:
+                self.logger.warning(f"Could not move model to GPU: {e}")
+
+        # Stage probes: measure SeisBench's internal preprocess + pick
+        # aggregation inside classify() so the driver gets measured per-stage
+        # times instead of one opaque classify wall time.
+        try:
+            from eqcctpro.timing_util import SeisBenchStageProbes
+            self._stage_probes = SeisBenchStageProbes(self.model_wrapper.model)
+        except Exception as e:
+            self.logger.warning(f"Stage probes unavailable: {e}")
+            self._stage_probes = None
+
+        self.logger.info("SeisBench model loaded successfully.")
+
+    def ready(self):
+        """Simple method to check if the actor is ready"""
+        return True
+
+    def warmup(self):
+        """One dummy forward through the model (timed by the driver).
+
+        Pays CUDA init / cuDNN autotune once, up front, so per-task inference
+        timings measure the steady state. The driver times the pool-wide
+        warmup wall and reports it as the ``warmup`` stage.
+        """
+        import torch
+
+        model = self.model_wrapper.model
+        in_samples = int(getattr(model, "in_samples", 3001) or 3001)
+        with torch.no_grad():
+            x = torch.zeros(1, 3, in_samples, device=self.device)
+            _ = model(x)
+        if self.use_gpu:
+            cuda_synchronize_best_effort()
+        return True
+
+    def classify(self, stream, P_threshold=0.3, S_threshold=0.3, Detection_threshold=0.3, **kwargs):
+        """
+        Classify a stream and return picks.
+        
+        Parameters:
+        -----------
+        stream : obspy.Stream
+            3-component ObsPy Stream
+        P_threshold : float
+            P phase detection threshold
+        S_threshold : float
+            S phase detection threshold
+        Detection_threshold : float
+            Detection threshold
+        **kwargs : dict
+            Additional arguments for model.classify()
+        
+        Returns:
+        --------
+        ClassifyOutput
+            Object containing picks
+        """
+        if self._stage_probes is not None:
+            self._stage_probes.reset()
+        out = self.model_wrapper.classify(
+            stream,
+            P_threshold=P_threshold,
+            S_threshold=S_threshold,
+            Detection_threshold=Detection_threshold,
+            **kwargs,
+        )
+        if self.use_gpu:
+            cuda_synchronize_best_effort()
+        if self._stage_probes is not None:
+            try:
+                out.eqcctpro_stage_timing = {
+                    "preprocess_s": self._stage_probes.preprocess_s,
+                    "pick_aggregate_s": self._stage_probes.pick_aggregate_s,
+                }
+            except Exception:
+                pass
+        return out
+
+
+@ray.remote
+def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
+    """
+    Prediction function for SeisBench models.
+    Uses mseed2stream_3c for preprocessing and SeisBenchModelActor for predictions.
+    ``predict_args`` may be ``(pos, station, out_dir, args)`` or 5-tuple with
+    ``args_ref`` / ``stream_ref`` (Ray ObjectRefs, scmlpick-style).
+    """
+    import glob
+    import shutil
+    import logging
+    from logging.handlers import QueueHandler
+    from eqcctpro.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
+    use_slipstream_array_path = bool(args.get("slipstream_inference"))
+
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
+    # Set up logger to forward to the main listener
+    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+    logger.setLevel(logging.INFO)
+    if args.get('log_queue') is not None:
+        logger.addHandler(QueueHandler(args['log_queue']))
+    
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
+
+    if out_path and os.path.isfile(out_path):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return (_pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."), 0.0, None)
+
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
+    try:
+        sink.write_header()
+        sink.flush()
+
+        start_Predicting = monotonic_s()
+
+        # ===== TIMING: Track waveform loading / preprocess time =====
+        waveform_load_start = monotonic_s()
+        stream3c = None
+        st_sel = None
+        files_list = None
+        slip_arr = None
+        slip_start_iso = None
+        slip_sr = None
+        slip_timing = None
+        freqmin, freqmax = 1.0, 45.0
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (_pfx(f"{pos} {station}: FAILED - No traces for station in shared Stream."), None, None)
+                if use_slipstream_array_path:
+                    slip_arr, slip_start_iso, slip_sr, fpair, slip_timing = _slipstream_arrays_from_station(
+                        args, station, files_list, st_sel, use_shared_stream=True,
+                    )
+                    if slip_arr is None:
+                        return (_pfx(f"{pos} {station}: FAILED - no data after SeisBench preprocess."), None, None)
+                    if fpair:
+                        freqmin, freqmax = fpair
+                elif len(st_sel) == 0:
+                    stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+                else:
+                    stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                if not files_list:
+                    return (_pfx(f"{pos} {station}: FAILED - No mSEED files found."), None, None)
+                if use_slipstream_array_path:
+                    slip_arr, slip_start_iso, slip_sr, fpair, slip_timing = _slipstream_arrays_from_station(
+                        args, station, files_list, None, use_shared_stream=False,
+                    )
+                    if slip_arr is None:
+                        return (_pfx(f"{pos} {station}: FAILED - no data after SeisBench preprocess."), None, None)
+                    if fpair:
+                        freqmin, freqmax = fpair
+                else:
+                    stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+        # Measured waveform/preprocess split: the slipstream array path runs
+        # model preprocessing in the worker (timed inside the helper); the
+        # classify path defers preprocessing to the actor (timed via probes).
+        worker_preprocess_time = float((slip_timing or {}).get("preprocess_s", 0.0))
+        waveform_time = max(0.0, waveform_load_time - worker_preprocess_time)
+
+        try:
+            # ===== TIMING: inference (actor forward + RPC; excludes duplicate preprocess on Slipstream) =====
+            inference_start = monotonic_s()
+            if use_slipstream_array_path:
+                classify_output = ray.get(model_actor.classify_array.remote(
+                    slip_arr,
+                    slip_start_iso,
+                    slip_sr,
+                    P_threshold=args.get('P_threshold', 0.3),
+                    S_threshold=args.get('S_threshold', 0.3),
+                ))
+            else:
+                _ma_kw = dict(
+                    P_threshold=args.get('P_threshold', 0.3),
+                    S_threshold=args.get('S_threshold', 0.3),
+                    Detection_threshold=args.get('Detection_threshold', 0.3),
+                    strict=False,
+                    flexible_horizontal_components=True,
+                )
+                if args.get('seisbench_overlap_samples') is not None:
+                    # Fairness: force the per-window overlap (samples) so orchestration
+                    # windows the trace identically to the native runner.
+                    _ma_kw['overlap'] = int(args.get('seisbench_overlap_samples'))
+                classify_output = ray.get(model_actor.classify.remote(stream3c, **_ma_kw))
+            inference_time = monotonic_s() - inference_start
+            # Measured in-actor segments (preprocess probes / pick extraction):
+            # subtract them from the RPC wall so "inference" is the measured
+            # forward(+RPC) component and pick extraction counts as pick time.
+            _actor_t = _actor_stage_timing(classify_output)
+            actor_preprocess_time = float(_actor_t.get("preprocess_s", 0.0))
+            actor_pick_time = float(
+                _actor_t.get("pick_extract_s", _actor_t.get("pick_aggregate_s", 0.0))
+            )
+            inference_component = max(0.0, inference_time - actor_preprocess_time - actor_pick_time)
+
+            # ===== TIMING: pick post-processing + writing to file =====
+            write_start = monotonic_s()
+            if stream3c is not None and len(stream3c) > 0:
+                station_code = stream3c[0].stats.station
+                network_code = stream3c[0].stats.network
+                station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0)
+                station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0)
+                station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0)
+            else:
+                station_code = str(station).strip()
+                network_code = ""
+                station_lat = station_lon = station_elv = 0.0
+
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
+            s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
+
+            # Track matched S picks by object id (Slipstream returns SimpleNamespace picks, which are not hashable).
+            used_s_ids: set[int] = set()
+            for p in p_picks:
+                p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
+                p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
+
+                if p_time is None:
+                    continue
+
+                if use_ascii_summary:
+                    pt_str = p_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    ascii_p_phases.append(pt_str)
+                    ascii_chrono_events.append((pt_str, "P"))
+
+                match_s = None
+                for s in s_picks:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    if id(s) not in used_s_ids and s_time and 0 < (s_time - p_time) < 30:
+                        match_s = s
+                        used_s_ids.add(id(s))
+                        break
+
+                if match_s:
+                    ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
+                    ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
+                    s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
+                    s_prob_str = f"{ms_prob:.6f}"
+                    if use_ascii_summary and ms_time:
+                        st_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        ascii_s_phases.append(st_str)
+                        ascii_chrono_events.append((st_str, "S"))
+                else:
+                    s_time_str = ''
+                    s_prob_str = ''
+
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    f"{p_prob:.6f}",
+                    s_time_str,
+                    s_prob_str
+                ])
+
+            for s in s_picks:
+                if id(s) not in used_s_ids:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
+                    if s_time:
+                        if use_ascii_summary:
+                            ost = s_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                            ascii_s_phases.append(ost)
+                            ascii_chrono_events.append((ost, "S"))
+                        sink.write_pick_row([
+                            station_code,
+                            network_code,
+                            station_code,
+                            0,
+                            station_lat,
+                            station_lon,
+                            station_elv,
+                            '',
+                            '',
+                            s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                            f"{s_prob:.6f}"
+                        ])
+
+            if not picks:
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    '', '', '', ''
+                ])
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station_code).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            sink.flush()
+            write_time = monotonic_s() - write_start
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            task_timing = _make_task_timing(
+                model_load=0.0,
+                waveform=waveform_time,
+                preprocess=worker_preprocess_time + actor_preprocess_time,
+                inference=inference_component,
+                write=write_time + actor_pick_time,
+                compute=delta,
+            )
+            return (
+                _pfx(
+                    f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+                ),
+                waveform_load_time,
+                ascii_row,
+                task_timing,
+            )
+
+        except Exception as exp:
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), load_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
+
+
+@ray.remote
+def parallel_predict(predict_args, model_actor, gpu=False):
+    """
+    Uses shared ModelActor for EQCCT inference.
+    ``predict_args`` may be ``(pos, station, out_dir, args)`` or 5-tuple with
+    Ray ObjectRefs for args and merged mSEED Stream (scmlpick-style).
+    """
+    import glob
+    import shutil
+    import logging
+    from logging.handlers import QueueHandler
+    # --- QUIET TF C++/Python LOGS BEFORE ANY TF IMPORT --- 
+    # We were getting info messages from TF because we were importing it natively from eqcct_tf_models
+    # We need to supress TF first before we import it fully
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # 3=ERROR
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # hide oneDNN banner
+    if not gpu:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")  # don't probe CUDA on CPU tasks
+
+    # Python-side TF/absl logging
+    try:
+        import tensorflow as tf
+        try:
+            tf.get_logger().setLevel(logging.ERROR)
+        except AttributeError:
+            # tf.get_logger() not available in some TF configurations
+            pass
+        try:
+            from absl import logging as absl_logging
+            absl_logging.set_verbosity(absl_logging.ERROR)
+        except Exception:
+            pass
+    except Exception:
+        # If eqcct_tf_models imports TF later, env vars above will still suppress C++ logs.
+        pass
+
+    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
+    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+
+    # NOTE: Model is shared via model_actor when model_actor is not None
+
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
+
+    if out_path and os.path.isfile(out_path):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return (_pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."), 0.0, None)
+
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
+    try:
+        sink.write_header()
+        sink.flush()
+
+        start_Predicting = monotonic_s()
+
+        # ===== TIMING: Track waveform loading time =====
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (_pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."), None, None)
+                    packed = _mseed2nparray(args, files_list, station)
+                else:
+                    packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+                if packed is None:
+                    return (_pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."), None, None)
+                meta, data_set, hp, lp = packed
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+                if meta is None:
+                    return (_pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."), None, None)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            model_load_task_time = 0.0
+            # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
+            if model_actor is None:
+                logger.info("RIPPER MODE: Loading EQCCT model inside task...")
+                # Configure GPU for this specific task process
+                if gpu:
+                    from eqcctpro.tools import tf_environ
+                    # Set a per-task VRAM limit if provided in args
+                    vram_limit = args.get('gpu_memory_limit_mb')
+                    tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
+
+                from eqcctpro.eqcct_tf_models import load_eqcct_model
+                _ml_start = monotonic_s()
+                model = load_eqcct_model(args['p_model'], args['s_model'])
+                model_load_task_time = monotonic_s() - _ml_start
+                logger.info("Model loaded inside task.")
+
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+                inference_start = monotonic_s()
+                predP, predS = model.predict(pred_generator, verbose=0)
+                inference_time = monotonic_s() - inference_start
+            else:
+                # Standard mode: Use the shared ModelActor
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+                # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
+                inference_start = monotonic_s()
+                predP, predS = ray.get(model_actor.predict_from_arrays.remote(
+                                    meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
+                inference_time = monotonic_s() - inference_start
+
+            # ===== TIMING: pick post-processing + writing to file =====
+            write_start = monotonic_s()
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
+                )
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            write_time = monotonic_s() - write_start
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            task_timing = _make_task_timing(
+                model_load=model_load_task_time,
+                preprocess=waveform_load_time,
+                inference=inference_time,
+                write=write_time,
+                compute=delta,
+            )
+            # Return tuple: (log_message, waveform_load_time, ascii_row or None, timing)
+            return (
+                _pfx(f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"),
+                waveform_load_time,
+                ascii_row,
+                task_timing,
+            )
+
+        except Exception as exp:
+            # Return tuple with waveform_load_time if available
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), load_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
+
+
+# =====================================================================
+# RIPPER MODE FUNCTIONS - Task-based approach (old methodology)
+# These functions load the model inside each task, then release it.
+# This allows dynamic GPU memory sharing but has model loading overhead.
+#
+# Task scheduling in mseed_predictor (ripper=True) follows the same pattern as
+# scmlpick ``run_picker`` (scmlpick/seiscomp/bin/scmlpick): seed up to
+# ``max_tasks_queue`` in-flight ``ray.remote`` calls, then ``ray.wait`` with
+# ``num_returns=1`` and backfill the queue while more jobs remain.
+# =====================================================================
+
+
+def _run_ripper_parallel_queue_scmlpick(
+    *,
+    logger,
+    tasks_predictor: list,
+    max_tasks_queue: int,
+    submit_index,
+):
+    """
+    Bounded Ripper task pool matching scmlpick's run_picker loop:
+    prefill min(max_tasks_queue, total), drain with ray.wait(..., 1), backfill.
+    ``submit_index(i)`` must return an ObjectRef for tasks_predictor[i].
+    """
+    total_tasks = len(tasks_predictor)
+    model_load_times: list = []
+    waveform_load_times: list = []
+    task_timings: list = []
+    ascii_rows: list = []
+
+    if total_tasks == 0:
+        return model_load_times, waveform_load_times, task_timings, ascii_rows
+
+    tasks_queue: list = []
+    idx_iter = iter(range(total_tasks))
+
+    for _ in range(min(max_tasks_queue, total_tasks)):
+        try:
+            i = next(idx_iter)
+            tasks_queue.append(submit_index(i))
+        except StopIteration:
+            break
+
+    while tasks_queue:
+        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+        for finished_task in tasks_finished:
+            try:
+                result = ray.get(finished_task)
+            except ray.exceptions.RayTaskError as e:
+                logger.warning("RIPPER task failed: %s", e.as_instanceof_cause())
+                continue
+            except ray.exceptions.RayError as e:
+                logger.warning("RIPPER Ray error: %s", e)
+                continue
+            log_e, ml_time, wf_time, ascii_row, task_timing = _unpack_ripper_predict_result(result)
+            logger.info("%s", log_e)
+            if ml_time is not None:
+                model_load_times.append(ml_time)
+            if wf_time is not None:
+                waveform_load_times.append(wf_time)
+            if task_timing is not None:
+                task_timings.append(task_timing)
+            if ascii_row is not None:
+                ascii_rows.append(ascii_row)
+        try:
+            while len(tasks_queue) < max_tasks_queue:
+                i = next(idx_iter)
+                tasks_queue.append(submit_index(i))
+        except StopIteration:
+            pass
+
+    return model_load_times, waveform_load_times, task_timings, ascii_rows
+
+
+@ray.remote(max_calls=1, max_retries=1)
+def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=None):
+    """
+    RIPPER MODE: Old task-based parallel_predict for EQCCT models.
+    Each task loads the model, runs prediction, and releases it.
+    This allows more flexible GPU memory sharing than the ModelActor approach.
+    
+    Args:
+        predict_args: ``(pos, station, out_dir, args)`` or
+            ``(pos, station, out_dir, args_ref, stream_ref)`` (Ray ObjectRefs, scmlpick-style).
+        gpu: Whether to use GPU
+        gpu_memory_limit_mb: VRAM limit per task in MB
+    """
+    import glob
+    import shutil
+    import logging
+    import sys
+    
+    # --- QUIET TF C++/Python LOGS BEFORE ANY TF IMPORT --- 
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # 3=ERROR
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # hide oneDNN banner
+    
+    if gpu is True: 
+        # Use unified tf_environ for stable GPU memory management
+        from eqcctpro.tools import tf_environ
+        try:
+            # Ripper mode tasks see 1 fractional GPU each (via Ray scheduling)
+            # so we just initialize that one GPU
+            tf_environ(
+                gpu_id=0, 
+                vram_limit_mb=gpu_memory_limit_mb,
+                logger=logging.getLogger("eqcctpro.ripper")
+            )
+        except (RuntimeError, ValueError):
+            pass  # Already initialized or logical devices configured
+    else:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")  # don't probe CUDA on CPU tasks
+
+    # Python-side TF/absl logging
+    try:
+        import tensorflow as tf
+        try:
+            tf.get_logger().setLevel(logging.ERROR)
+        except AttributeError:
+            pass
+        try:
+            from absl import logging as absl_logging
+            absl_logging.set_verbosity(absl_logging.ERROR)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
+    # RIPPER MODE: Load the model inside this task (old approach)
+    # ===== TIMING: Track model load time for ripper mode analysis =====
+    model_load_start = monotonic_s()
+    model = load_eqcct_model(args["p_model"], args["s_model"])
+    model_load_time = monotonic_s() - model_load_start
+
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
+
+    if out_path and os.path.isfile(out_path):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return (
+                _pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."),
+                model_load_time,
+                0.0,
+                None,
+            )
+
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
+    try:
+        sink.write_header()
+        sink.flush()
+
+        start_Predicting = monotonic_s()
+
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (
+                            _pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."),
+                            model_load_time,
+                            None,
+                            None,
+                        )
+                    packed = _mseed2nparray(args, files_list, station)
+                else:
+                    packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                packed = _mseed2nparray(args, files_list, station)
+            if packed is None:
+                return (
+                    _pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."),
+                    model_load_time,
+                    None,
+                    None,
+                )
+            meta, data_set, hp, lp = packed
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else 'FAILED reading mSEED (corrupted or empty files).'
+            return (_pfx(f"{pos} {station}: {err_msg}"), model_load_time, None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+            # ===== TIMING: inference (model forward pass) =====
+            inference_start = monotonic_s()
+            predP, predS = model.predict(pred_generator, verbose=0)
+            inference_time = monotonic_s() - inference_start
+
+            # ===== TIMING: pick post-processing + writing to file =====
+            write_start = monotonic_s()
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
+                )
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            write_time = monotonic_s() - write_start
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            task_timing = _make_task_timing(
+                model_load=model_load_time,
+                preprocess=waveform_load_time,
+                inference=inference_time,
+                write=write_time,
+                compute=delta,
+            )
+
+            del model
+            try:
+                import tensorflow as tf
+                tf.keras.backend.clear_session()
+            except Exception:
+                pass
+
+            return (
+                _pfx(f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"),
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+                task_timing,
+            )
+
+        except Exception as exp:
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), model_load_time, wf_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
+
+
+@ray.remote(max_calls=1, max_retries=1)
+def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_mb=None, 
+                                       parent_model_name=None, child_model_name=None,
+                                       Detection_threshold=0.3):
+    """
+    RIPPER MODE: Old task-based parallel_predict for SeisBench models.
+    Each task loads the model, runs prediction, and releases it.
+    This allows more flexible GPU memory sharing than the ModelActor approach.
+    
+    Args:
+        predict_args: ``(pos, station, out_dir, args)`` or
+            ``(pos, station, out_dir, args_ref, stream_ref)`` (Ray ObjectRefs).
+        gpu: Whether to use GPU
+        gpu_memory_limit_mb: VRAM limit per task in MB (not used for PyTorch, but kept for API compatibility)
+        parent_model_name: SeisBench parent model name (e.g., 'PhaseNet')
+        child_model_name: SeisBench child model name (e.g., 'original')
+        Detection_threshold: Detection threshold for picks
+    """
+    import glob
+    import shutil
+    import logging
+    import sys
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
+    # RIPPER MODE: Load the picking backend inside this task.
+    # * default: SeisBench model via SeisBenchModels -> model.classify() end-to-end
+    # * slipstream_inference: RAPID lean PyTorch backend -> lean_classify_stream()
+    #   (same pipeline as the Slipstream Model-Actor, but loaded per task)
+    from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c, process_raw_station_stream_3c
+    import torch
+
+    device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
+    use_slipstream = bool(args.get("slipstream_inference"))
+
+    # ===== TIMING: Track model load time for ripper mode analysis =====
+    model_load_start = monotonic_s()
+
+    lean_backend = None
+    model_wrapper = None
+    stage_probes = None
+    if use_slipstream:
+        from eqcctpro.slipstream_actor import _ensure_rapid_on_path
+
+        _ensure_rapid_on_path()
+        from rapid.backends.lean_pytorch import LeanPyTorchBackend
+
+        lean_backend = LeanPyTorchBackend(
+            parent_model_name,
+            child_model_name,
+            device=("cuda:0" if (gpu and torch.cuda.is_available()) else "cpu"),
+            dtype=str(args.get("slipstream_dtype", "bf16")),
+            compile=bool(args.get("slipstream_compile", False)),
+        )
+        lean_backend.load()
+    else:
+        # Create and load the model (skip validation — driver already verified the model name)
+        model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
+        model_wrapper.load_model()
+
+        # Move model to device if using GPU
+        if gpu and torch.cuda.is_available():
+            try:
+                if hasattr(model_wrapper.model, 'to'):
+                    model_wrapper.model.to(device)
+            except Exception:
+                pass
+        # Stage probes: measured preprocess + pick aggregation inside classify().
+        try:
+            from eqcctpro.timing_util import SeisBenchStageProbes
+            stage_probes = SeisBenchStageProbes(model_wrapper.model)
+        except Exception:
+            stage_probes = None
+    if gpu:
+        cuda_synchronize_best_effort()
+    model_load_time = monotonic_s() - model_load_start
+
+    # ===== TIMING: per-task warmup (Ripper loads per task, so the first-inference
+    # cost is paid per task; measure it separately from steady-state inference) =====
+    warmup_start = monotonic_s()
+    try:
+        if use_slipstream:
+            import numpy as _np
+
+            _dummy = _np.zeros((1, 3, int(lean_backend.in_samples)), dtype=_np.float32)
+            _ = lean_backend.infer_chunked(_dummy, batch_size=1)
+        else:
+            _in_samples = int(getattr(model_wrapper.model, "in_samples", 3001) or 3001)
+            with torch.no_grad():
+                _ = model_wrapper.model(torch.zeros(1, 3, _in_samples, device=device))
+        if gpu:
+            cuda_synchronize_best_effort()
+    except Exception:
+        pass
+    warmup_time = monotonic_s() - warmup_start
+    
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
+
+    if out_path and os.path.isfile(out_path):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return (
+                _pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."),
+                model_load_time,
+                0.0,
+                None,
+            )
+
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
+    try:
+        sink.write_header()
+        sink.flush()
+
+        start_Predicting = monotonic_s()
+
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (
+                            _pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."),
+                            model_load_time,
+                            None,
+                            None,
+                        )
+                    result = mseed2stream_3c(args, files_list, station)
+                else:
+                    result = process_raw_station_stream_3c(args, st_sel, station)
+                if result is None:
+                    return (
+                        _pfx(f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."),
+                        model_load_time,
+                        None,
+                        None,
+                    )
+                stream, freqmin, freqmax = result
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                result = mseed2stream_3c(args, files_list, station)
+                if result is None:
+                    return (
+                        _pfx(f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."),
+                        model_load_time,
+                        None,
+                        None,
+                    )
+                stream, freqmin, freqmax = result
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), model_load_time, None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            # ===== TIMING: inference (model forward pass) =====
+            inference_start = monotonic_s()
+            if use_slipstream:
+                from eqcctpro.slipstream_actor import lean_classify_stream
+
+                classify_output = lean_classify_stream(
+                    lean_backend,
+                    stream,
+                    overlap_samples=int(args.get('slipstream_overlap_samples', 0) or 0),
+                    batch_size=int(args.get('slipstream_batch_size', 256) or 256),
+                    P_threshold=args.get('P_threshold', 0.3),
+                    S_threshold=args.get('S_threshold', 0.3),
+                    use_gpu=gpu,
+                )
+            else:
+                if stage_probes is not None:
+                    stage_probes.reset()
+                _rip_kw = dict(
+                    P_threshold=args.get('P_threshold', 0.3),
+                    S_threshold=args.get('S_threshold', 0.3),
+                    Detection_threshold=Detection_threshold,
+                    strict=False,
+                    flexible_horizontal_components=True,
+                )
+                if args.get('seisbench_overlap_samples') is not None:
+                    _rip_kw['overlap'] = int(args.get('seisbench_overlap_samples'))
+                classify_output = model_wrapper.classify(stream, **_rip_kw)
+            if gpu:
+                cuda_synchronize_best_effort()
+            inference_time = monotonic_s() - inference_start
+            # Measured preprocess / pick-extraction segments inside the call
+            # (lean path attaches stage_timing; classify path uses probes).
+            if use_slipstream:
+                _rip_st = _actor_stage_timing(classify_output)
+                in_call_preprocess = float(_rip_st.get("preprocess_s", 0.0))
+                in_call_pick = float(_rip_st.get("pick_extract_s", 0.0))
+            elif stage_probes is not None:
+                in_call_preprocess = float(stage_probes.preprocess_s)
+                in_call_pick = float(stage_probes.pick_aggregate_s)
+            else:
+                in_call_preprocess = 0.0
+                in_call_pick = 0.0
+            inference_component = max(0.0, inference_time - in_call_preprocess - in_call_pick)
+
+            # ===== TIMING: pick post-processing + writing to file =====
+            write_start = monotonic_s()
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            for pick in picks:
+                pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
+                pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
+                pick_phase = getattr(pick, 'phase', 'P').upper()
+
+                if pick_time is None:
+                    continue
+                if use_ascii_summary:
+                    t_str = pick_time.strftime('%Y-%m-%d %H:%M:%S.%f') if hasattr(pick_time, 'strftime') else str(pick_time)
+                    if pick_phase == 'P':
+                        ascii_p_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "P"))
+                    elif pick_phase == 'S':
+                        ascii_s_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "S"))
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    str(pick_time) if pick_phase == 'P' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',
+                    str(pick_time) if pick_phase == 'S' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''
+                ])
+
+            if not picks:
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    '', '', '', ''
+                ])
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            sink.flush()
+            write_time = monotonic_s() - write_start
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            task_timing = _make_task_timing(
+                model_load=model_load_time,
+                warmup=warmup_time,
+                waveform=waveform_load_time,
+                preprocess=in_call_preprocess,
+                inference=inference_component,
+                write=write_time + in_call_pick,
+                compute=delta,
+            )
+
+            del model_wrapper
+            if lean_backend is not None:
+                try:
+                    lean_backend.close()
+                except Exception:
+                    pass
+                del lean_backend
+            if gpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            return (
+                _pfx(
+                    f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+                ),
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+                task_timing,
+            )
+
+        except Exception as exp:
+            ml_time = model_load_time if 'model_load_time' in locals() else None
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), ml_time, wf_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass

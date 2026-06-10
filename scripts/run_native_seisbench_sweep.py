@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RAPID_ROOT = Path(__file__).resolve().parents[1]
-EQCCTPRO_ROOT = RAPID_ROOT.parent
+EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
 for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)

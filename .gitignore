@@ -5,6 +5,10 @@ logs/
 *.log
 nohup.out
 
+# Benchmark input data (built locally with scripts/build_seisbench_network.py)
+data/
+tmp_ray/
+
 # Working notes, paper drafts, knowledge-graph exports (not part of the package)
 docs/
 graphify-out/

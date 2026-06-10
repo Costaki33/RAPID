@@ -39,11 +39,13 @@ lands in SeisBench.
 ## What's in the repo
 
 ```
-rapid/                  The Python package
+rapid/                  The benchmarking package
   backends/             Inference backends (baseline, lean PyTorch, ONNX, TensorRT)
   runners/              Single-GPU, dual-GPU, and pipelined execution paths
   benchmark/            Fair-benchmark machinery: stage timing, memory/resource
                         sampling, pick export, pick-quality scoring
+eqcctpro/               The Ray orchestration framework (Ripper, Model-Actor,
+                        Slipstream) — vendored here; this is its home now
 scripts/                Runnable entry points (benchmarks, sweeps, plots, analysis)
 configs/                JSON configs for the matrix and dtype sweeps
 models_exported/        Where ONNX/TensorRT exports land (kept out of git)
@@ -51,17 +53,25 @@ environment.yml         Full pinned conda environment
 requirements-extra.txt  Optional ONNX/TensorRT dependencies
 ```
 
-`results/`, `figures/`, and `logs/` are created at runtime and intentionally
-not committed.
+`results/`, `figures/`, `logs/`, and `data/` (the benchmark networks you build
+locally) are created at runtime and intentionally not committed.
+
+> **Note on eqcctpro:** the standalone
+> [eqcctpro](https://github.com/ut-beg-texnet/eqcct/tree/main/eqcctpro)
+> repository and the `eqcctpro` PyPI package are **deprecated**. The
+> orchestration framework lives in this repository now (`eqcctpro/`) and is
+> developed and versioned here. If you have the old PyPI or editable install
+> in your environment, remove it first: `pip uninstall eqcctpro`.
 
 ## Installation
 
 ```bash
 # 1. Create the environment (pinned, known-good versions)
 conda env create -f environment.yml
-conda activate eqcctpro
+conda activate rapid
 
-# 2. Install the rapid package itself (editable)
+# 2. Install the package (editable) — installs both `rapid` and the
+#    vendored `eqcctpro` orchestration framework
 cd RAPID
 pip install -e .
 ```
@@ -74,12 +84,9 @@ pip install -e ".[orchestration]"        # Ray, for the orchestration benchmarks
 pip install -r requirements-extra.txt    # ONNX Runtime / TensorRT helpers
 ```
 
-**Orchestration benchmarks need eqcctpro.** The Ripper and Model-Actor
-strategies are implemented in the
-[eqcctpro](https://github.com/ut-beg-texnet/eqcct/tree/main/eqcctpro) package.
-The scripts expect this repository to live inside the eqcct repo at
-`eqcct/eqcctpro/RAPID/` (they import eqcctpro from the parent directory). The
-native benchmarks — everything that doesn't involve Ray — work standalone.
+Everything is self-contained: the native benchmarks need only the core stack,
+and the orchestration benchmarks (Ripper / Model-Actor / Slipstream) use the
+vendored `eqcctpro/` package plus Ray. No other repository is required.
 
 ## Quick start
 

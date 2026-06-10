@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 RAPID_ROOT = Path(__file__).resolve().parents[1]
-EQCCTPRO_ROOT = RAPID_ROOT.parent
+EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
 
 DATASETS = ["stead", "txed"]
 STATION_COUNTS = [250, 580]

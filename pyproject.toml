@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rapid-benchmark"
 version = "1.0.0"
-description = "RAPID: benchmarking toolkit for real-time deep-learning seismic phase picking (faster-than-annotate inference paths, fair deployment benchmark, pick-quality scoring)"
+description = "RAPID: real-time deep-learning seismic phase picking — lean inference paths, Ray orchestration (vendored eqcctpro), fair deployment benchmark, pick-quality scoring"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,11 +25,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Ray-based orchestration benchmarks (Ripper / Model-Actor / Slipstream)
-# also require the eqcctpro package -- see README "Orchestration benchmarks".
+# Ray-based orchestration (Ripper / Model-Actor / Slipstream). The eqcctpro
+# package is vendored in this repo; Ray is its only extra hard dependency.
+# (The legacy EQCCT TensorFlow model path additionally needs tensorflow.)
 orchestration = ["ray>=2.40"]
 # ONNX Runtime / TensorRT backends (see requirements-extra.txt for details)
 onnx = ["onnx>=1.15", "onnxruntime-gpu>=1.17"]
 
 [tool.setuptools.packages.find]
-include = ["rapid*"]
+include = ["rapid*", "eqcctpro*"]
