@@ -221,6 +221,8 @@ def evaluate_trace(
     runs: List[Tuple[str, bool]] = [(d, False) for d in ordered]
     if include_fp16_compile and parent != "EQTransformer" and "fp16" in dtypes:
         runs.append(("fp16", True))
+    if "bf16" in dtypes and ("bf16", True) not in runs:
+        runs.append(("bf16", True))
 
     for dtype, use_compile in runs:
         key = f"{dtype}_compile" if use_compile else dtype

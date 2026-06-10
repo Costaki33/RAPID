@@ -110,6 +110,13 @@ class LeanPyTorchBackend(InferenceBackend):
         if self.parent_model == "EQTransformer" and self.dtype == "fp16":
             raise BackendError(EQT_LEAN_FP16_MESSAGE)
 
+        # Dtype policy: any reduced precision (fp16/bf16) casts the weights so the
+        # whole forward runs in the target dtype, with or without compile -- one
+        # consistent numerical path for benchmarking (device -> cast -> compile ->
+        # forward). EQT+fp16 stays blocked above (-1e10 pad sentinel overflows fp16).
+        if self.dtype in ("fp16", "bf16"):
+            self.cast_weights = True
+
         model_cls = getattr(sbm, self.parent_model)
         model = model_cls.from_pretrained(self.child_model)
         model.eval()
@@ -193,6 +200,8 @@ class LeanPyTorchBackend(InferenceBackend):
                 preprocessed, piggyback = preprocessed
             else:
                 piggyback = None
+            if self.cast_weights:
+                preprocessed = preprocessed.to(self._torch_dtype)
             preds = self._fwd_model(preprocessed)
             preds = self._raw_model.annotate_batch_post(
                 preds, piggyback=piggyback, argdict=argdict

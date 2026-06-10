@@ -1,5 +1,27 @@
+# Benchmark outputs (large, machine-specific)
 results/
 figures/
+logs/
+*.log
+nohup.out
+
+# Working notes, paper drafts, knowledge-graph exports (not part of the package)
+docs/
+graphify-out/
+attic/
+
+# Exported model artifacts (regenerate with scripts/export_models.py)
+models_exported/*
+!models_exported/.gitkeep
+
+# Python
 **/__pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+
+# Editors / OS
 .DS_Store
+.vscode/
+.idea/

@@ -63,6 +63,7 @@ DEFAULT_DTYPES = [
     {"dtype": "fp16", "compile": False},
     {"dtype": "bf16", "compile": False},
     {"dtype": "fp16", "compile": True},
+    {"dtype": "bf16", "compile": True},
 ]
 
 # EQTransformer has a hardcoded -1e10 sentinel in its encoder that
@@ -111,7 +112,7 @@ def main() -> int:
                          "1 = P for SeisBench post-processed outputs.")
     ap.add_argument("--dtypes", type=str, default=None,
                     help="Comma-separated dtypes to test (e.g. fp16,bf16). "
-                         "Default sweeps fp16, bf16, fp16+compile.")
+                         "Default sweeps fp16, bf16, fp16+compile, bf16+compile.")
     ap.add_argument("--models", type=str, default=None,
                     help="Comma-separated model labels to test. Default: "
                          "every model in the config.")
