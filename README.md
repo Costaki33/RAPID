@@ -133,7 +133,45 @@ deployment strategies, the way they'd actually run in production:
 Each trial sweeps datasets (STEAD/TXED test networks at 250 and 580 stations),
 CPU budgets (5–20 cores, plus CPU+GPU), window regimes, precisions, and batch
 sizes. Native trials run 5 repeats, each in a fresh subprocess; orchestration
-trials run once per configuration. The full matrix is ~23,000 trials.
+trials run once per configuration (`--orch-repeats`).
+
+### Matrix size: where the trial counts come from
+
+The base grid is **384 configurations**:
+
+```
+8 model-window-regime combos     PhaseNet x 3 regimes, PhaseNetLight x 3,
+                                 EQTransformer x 1, EQT-NC x 1
+x 2 datasets                     stead, txed
+x 2 station counts               250, 580
+x 12 device points               CPU cores {5,8,11,14,17,20} + the same six
+                                 host-core budgets with a GPU
+= 384
+```
+
+Each method multiplies that grid by its own sweep dimensions:
+
+| Method                | Extra dimensions                                    | Trials |
+| --------------------- | --------------------------------------------------- | -----: |
+| annotate              | 4 batch sizes                                       |  1,536 |
+| classify              | none (fp32, no batching)                            |    384 |
+| slipstream            | precision x batch (PN family 5x4, EQT family 3x4)  |  6,912 |
+| ripper                | none (SeisBench classify, fp32)                     |    384 |
+| modelactor            | none (SeisBench classify, fp32)                     |    384 |
+| ripper_slipstream     | precision x batch, **compile variants excluded**    |  4,224 |
+| modelactor_slipstream | precision x batch (incl. compile)                   |  6,912 |
+| **Total**             |                                                     | **20,736** |
+
+Precisions: fp32 always; PhaseNet/PhaseNetLight add fp16 and bf16 (each with
+and without `torch.compile`); the EQT family adds bf16 only (fp16 overflows
+its attention padding sentinel). `ripper_slipstream` drops the compile
+variants because Ripper re-loads the model inside every station task, so
+compilation would be paid per task — a configuration nobody would deploy.
+Model-Actor keeps them: its persistent actors compile once and amortize.
+
+After the matrix, two follow-on sweeps run automatically: the back-to-back
+**latency sweep** (528 trials) and the **oversubscription sweep** (512 trials,
+concurrency 1–4x the core budget; see `scripts/run_oversub_sweep.sh`).
 
 ### What gets measured
 

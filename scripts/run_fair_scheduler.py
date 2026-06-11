@@ -221,6 +221,13 @@ def build_orch_trials(args) -> List[Trial]:
             for strategy in (args.orch_strategies or ORCH_STRATEGIES):
                 slip = strategy in ORCH_SLIPSTREAM_STRATEGIES
                 precs = _slipstream_specs(model) if slip else [("fp32", False, "fp32")]
+                # Ripper re-loads (and would re-compile) the model inside EVERY
+                # station task, so torch.compile costs are paid per task -- a
+                # configuration nobody would deploy. Dropped 2026-06-11 to cut
+                # ~2,700 of the slowest trials; Model-Actor keeps its compile
+                # variants (compiled once per persistent actor).
+                if strategy == "ripper_slipstream":
+                    precs = [p for p in precs if not p[1]]
                 batches = args.batch_sizes if slip else [256]
                 for dataset in (args.datasets or DATASETS):
                     for n_st in (args.stations or STATION_COUNTS):
