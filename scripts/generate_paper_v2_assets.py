@@ -84,6 +84,9 @@ def load_rows():
         row["warm_s"] = lat.get("warm_feed_mean_s_mean")
         row["warm_std"] = lat.get("warm_feed_mean_s_std")
         row["n_modelactors"] = (reps[0] or {}).get("n_modelactors")
+        # Per-repeat samples for distribution plots.
+        row["_totals"] = [x["total_s"] for x in reps]
+        row["_pq_reps"] = [x.get("P", {}) for x in (pq.get("repeats") or []) if isinstance(x, dict)]
         rows.append(row)
     return rows
 
@@ -307,6 +310,124 @@ def fig_latency():
     plt.close(fig)
 
 
+# ---- Distribution figures ---------------------------------------------------
+DIST_METHODS = [
+    ("annotate", dict(family="native", method="annotate"), None),
+    ("classify", dict(family="native", method="classify"), None),
+    ("slip FP32", dict(family="native", method="slipstream", dtype="fp32"), None),
+    ("slip FP16", dict(family="native", method="slipstream", dtype="fp16"), None),
+    ("slip BF16", dict(family="native", method="slipstream", dtype="bf16"), None),
+    ("ripper", dict(family="orchestration", method="ripper"), None),
+    ("MA", dict(family="orchestration", method="modelactor"), None),
+    ("ripper+slip", dict(family="orchestration", method="ripper_slipstream", dtype="fp32"), None),
+    ("MA+slip", dict(family="orchestration", method="modelactor_slipstream", dtype="fp32"), None),
+]
+
+
+def _dist_pool(model, ds, flt, value):
+    """Pool per-repeat samples over core budgets and batch sizes (CPU, 580 st)."""
+    out = []
+    for r in sel(ROWS, model=model, ds=ds, st=580, dev="cpu", **flt):
+        if r["regime"] != canonical_regime(model) or r["comp"]:
+            continue
+        if value == "total":
+            out.extend(r["_totals"])
+        else:
+            out.extend(p[value] for p in r["_pq_reps"] if p.get(value) is not None)
+    return out
+
+
+def fig_timing_dist():
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharey=False)
+    for ax, model in zip(axes.flat, MODELS):
+        data, labels = [], []
+        for label, flt, _ in DIST_METHODS:
+            vals = _dist_pool(model, "stead", flt, "total")
+            if vals:
+                data.append(vals); labels.append(f"{label}\n(n={len(vals)})")
+        if not data:
+            continue
+        bp = ax.boxplot(data, tick_labels=labels, showfliers=True,
+                        flierprops=dict(ms=2, alpha=0.4), patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("#7fb3d5")
+        ax.set_yscale("log")
+        ax.axhline(30, color="red", ls="--", lw=1)
+        ax.set_title(model)
+        ax.set_ylabel("total wall time (s)")
+        ax.tick_params(axis="x", labelsize=6)
+    fig.suptitle("Total wall-time distributions per method — per-repeat samples pooled over\n"
+                 "core budgets and batch sizes (STEAD, 580 st, CPU; red line = 30 s target)",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(OUT / "fig_timing_distributions.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_f1_dist():
+    import random
+
+    rng = random.Random(0)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7), sharey=True)
+    q_methods = [m for m in DIST_METHODS if m[0] not in ("ripper", "MA")]
+    for ax, model in zip(axes.flat, MODELS):
+        pos, labels = [], []
+        for i, (label, flt, _) in enumerate(q_methods):
+            for j, (ds, color) in enumerate((("stead", "#2e86c1"), ("txed", "#e67e22"))):
+                vals = _dist_pool(model, ds, flt, "f1")
+                if vals:
+                    xs = [i + (j - 0.5) * 0.34 + rng.uniform(-0.10, 0.10) for _ in vals]
+                    ax.scatter(xs, vals, s=7, alpha=0.35, color=color, edgecolors="none")
+                    med = sorted(vals)[len(vals) // 2]
+                    ax.hlines(med, i + (j - 0.5) * 0.34 - 0.14, i + (j - 0.5) * 0.34 + 0.14,
+                              color=color, lw=1.6)
+            pos.append(i); labels.append(label)
+        ax.set_xticks(pos); ax.set_xticklabels(labels, fontsize=6.5)
+        ax.set_title(model)
+        ax.set_ylabel("P-wave F1 vs catalog")
+        ax.set_ylim(0.3, 1.02)
+    import matplotlib.patches as mpatches
+    fig.legend(handles=[mpatches.Patch(color="#2e86c1", label="STEAD"),
+                        mpatches.Patch(color="#e67e22", label="TXED")],
+               loc="lower center", ncol=2, fontsize=9)
+    fig.suptitle("P-wave F1 per repeat (every dot = one run) — pooled over core budgets and\n"
+                 "batch sizes, 580 st, CPU. Near-zero vertical spread = config-independent quality.",
+                 fontsize=10)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.savefig(OUT / "fig_f1_distributions.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_dt_dist():
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    q_methods = [m for m in DIST_METHODS if m[0] not in ("ripper", "MA")]
+    for ax, (metric, title) in zip(
+        axes,
+        (("median_dt", "median ΔT (samples; sign = early/late vs catalog)"),
+         ("p95_abs_dt", "P95 |ΔT| (samples)")),
+    ):
+        data, labels = [], []
+        for label, flt, _ in q_methods:
+            vals = []
+            for model in MODELS:
+                vals.extend(_dist_pool(model, "stead", flt, metric))
+            if vals:
+                data.append(vals); labels.append(f"{label}\n(n={len(vals)})")
+        bp = ax.boxplot(data, tick_labels=labels, showfliers=True,
+                        flierprops=dict(ms=2, alpha=0.3), patch_artist=True)
+        for patch in bp["boxes"]:
+            patch.set_facecolor("#a9dfbf")
+        if metric == "median_dt":
+            ax.axhline(0, color="k", lw=0.8)
+        ax.set_ylabel(title)
+        ax.tick_params(axis="x", labelsize=6.5)
+    fig.suptitle("Pick-timing distributions per method — per-repeat samples pooled over models,\n"
+                 "core budgets and batch sizes (STEAD, 580 st, CPU; 1 sample = 10 ms)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(OUT / "fig_dt_distributions.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 # ---- Tables -----------------------------------------------------------------
 def table_native_baselines():
     TBL.write("## T1. Native single-process baselines (mean total s, cold start; STEAD)\n\n")
@@ -411,6 +532,9 @@ fig_orchestration()
 fig_quality()
 fig_memory()
 fig_latency()
+fig_timing_dist()
+fig_f1_dist()
+fig_dt_dist()
 table_native_baselines()
 table_orchestration()
 table_pick_quality()
