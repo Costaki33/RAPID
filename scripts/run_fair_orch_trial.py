@@ -431,6 +431,56 @@ def run_one_repeat(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _vram_capped_redundant(args, conc: int) -> Optional[Dict[str, Any]]:
+    """Detect whether this oversub trial duplicates an already-capped sibling.
+
+    The achieved actor pool is ``min(requested, memory_cap)`` and the memory cap
+    (VRAM on GPU, RAM on CPU) is fixed for a given (model, device, precision) and
+    does NOT depend on the requested concurrency or the host-core budget. So once
+    a sibling at the SAME host-core budget and precision has been VRAM/RAM-capped
+    to ``M`` actors (achieved ``M`` < its requested), every higher request also
+    yields exactly ``M`` actors -- an identical pool on identical hardware, hence
+    an identical trial. We skip those and point at the representative sibling.
+
+    Returns the skip-info dict (sibling tag + capped actor count) or None. Only
+    the higher-request trial skips; the smallest request that first hits the cap
+    still runs and establishes ``M``.
+    """
+    out_dir = _out_dir(args)
+    model_dir = out_dir.parent  # .../oversub/orchestration/<strategy>/<ds>/<Nst>/<model>/
+    if not model_dir.is_dir():
+        return None
+    for sib in model_dir.glob("*/result.json"):
+        if sib.parent == out_dir:
+            continue
+        try:
+            data = json.loads(sib.read_text())
+        except Exception:
+            continue
+        if data.get("skipped"):
+            continue
+        meta = data.get("meta", {})
+        # Same experimental condition modulo the multiplier: same host-core
+        # budget, device, and precision. (Different n_cpus = different host
+        # preprocessing parallelism = a genuinely different condition.)
+        if meta.get("n_cpus") != args.n_cpus or meta.get("device") != args.device:
+            continue
+        if (meta.get("dtype") or "fp32") != args.dtype:
+            continue
+        sib_req = meta.get("concurrency")
+        if not sib_req:
+            continue
+        reps = [r for r in data.get("timing", {}).get("repeats", []) if r.get("success")]
+        achieved = max((int(r.get("n_modelactors") or 0) for r in reps), default=0)
+        if achieved <= 0:
+            continue
+        capped = achieved < sib_req            # the sibling itself hit the memory cap
+        if capped and conc >= achieved and conc > sib_req:
+            return {"redundant_with": meta.get("tag"), "capped_actors": achieved,
+                    "sibling_requested": sib_req}
+    return None
+
+
 def run_driver(args) -> int:
     gpu = args.device == "gpu"
     net_dir = _net_dir(args.net_root, args.dataset, args.n_stations, args.net_suffix)
@@ -455,9 +505,45 @@ def run_driver(args) -> int:
         except Exception:
             return False
 
-    if args.resume and result_path.is_file() and all(_ok(i) for i in range(args.repeats)):
-        print(f"[resume] complete -> {result_path}")
-        return 0
+    if args.resume and result_path.is_file():
+        try:
+            prior = json.loads(result_path.read_text())
+        except Exception:
+            prior = {}
+        if prior.get("skipped") or all(_ok(i) for i in range(args.repeats)):
+            print(f"[resume] complete -> {result_path}")
+            return 0
+
+    # Oversub dedup: skip if an already-capped sibling at the same host-core
+    # budget + precision proves this request yields the identical actor pool.
+    if getattr(args, "dedup_vram_capped", False):
+        red = _vram_capped_redundant(args, conc)
+        if red is not None:
+            m = MODELS[args.model]
+            skip_doc = {
+                "schema_version": 3,
+                "skipped": True,
+                "skip_reason": (
+                    f"VRAM/RAM-capped redundant: requested concurrency {conc} would yield the "
+                    f"same {red['capped_actors']}-actor pool as sibling '{red['redundant_with']}' "
+                    f"(requested {red['sibling_requested']}, capped to {red['capped_actors']}) on "
+                    f"identical hardware ({args.n_cpus} host CPUs, {args.device}, {args.dtype}). "
+                    f"Not run to avoid recomputing an already-measured configuration."
+                ),
+                "redundant_with": red["redundant_with"],
+                "capped_actors": red["capped_actors"],
+                "meta": dict(
+                    method=args.strategy, family="orchestration", dataset=args.dataset.lower(),
+                    n_stations=args.n_stations, model=args.model, parent=m["parent"], child=m["child"],
+                    device=args.device, n_cpus=n_cpus, dtype=args.dtype, compile=args.compile,
+                    concurrency=conc, tag=args.tag,
+                ),
+            }
+            out_dir.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(skip_doc, indent=2, default=str))
+            print(f"[skip-redundant] {args.tag}: conc={conc} -> "
+                  f"same {red['capped_actors']} actors as {red['redundant_with']}; wrote {result_path}")
+            return 0
 
     for i in range(args.repeats):
         if args.resume and _ok(i):
@@ -578,6 +664,10 @@ def main() -> int:
     ap.add_argument("--tmp-dir", type=Path, default=EQCCTPRO_ROOT / "tmp_ray")
     ap.add_argument("--repeat-index", type=int, default=-1)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--dedup-vram-capped", action="store_true",
+                    help="Skip this trial (writing a noted skip result.json) if an already-capped "
+                         "sibling at the same host-core budget + precision proves the requested "
+                         "concurrency yields an identical actor pool. Used by the oversub sweep.")
     args = ap.parse_args()
     if args.repeat_index >= 0:
         return run_one_repeat(args)

@@ -119,6 +119,10 @@ def _is_complete(result_path: Path, repeats: int) -> bool:
         return False
     try:
         data = json.loads(result_path.read_text())
+        # A trial deliberately skipped as redundant (oversub VRAM/RAM-cap dedup)
+        # is resolved -- do not re-dispatch it.
+        if data.get("skipped"):
+            return True
         reps = data.get("timing", {}).get("repeats", [])
         done = sum(1 for r in reps if r.get("success"))
         return done >= repeats
@@ -428,6 +432,7 @@ def build_oversub_trials(args) -> List[Trial]:
                                     "--net-root", str(args.net_root),
                                     "--results-root", str(results_root),
                                     "--resume",
+                                    "--dedup-vram-capped",
                                 ]
                                 trials.append(Trial(
                                     trial_id=f"oversub/{strategy}/{dataset}/{n_st}st/{model}/{tag}",

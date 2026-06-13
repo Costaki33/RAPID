@@ -33,6 +33,9 @@ def _load(p: Path) -> Optional[Dict[str, Any]]:
 
 
 def _status(d: Dict[str, Any]) -> str:
+    # Deliberately skipped (oversub VRAM/RAM-cap dedup): resolved, not a failure.
+    if d.get("skipped"):
+        return "skipped"
     reps = d.get("timing", {}).get("repeats", [])
     ok = sum(1 for r in reps if r.get("success"))
     want = d.get("meta", {}).get("repeats", 0) or 0
@@ -62,21 +65,22 @@ def main() -> int:
             docs.append(d)
 
     if not args.table:
-        counts: Dict[tuple, Dict[str, int]] = defaultdict(lambda: {"complete": 0, "partial": 0, "empty": 0})
+        counts: Dict[tuple, Dict[str, int]] = defaultdict(
+            lambda: {"complete": 0, "partial": 0, "empty": 0, "skipped": 0})
         for d in docs:
             m = d["meta"]
             key = (m.get("family", "?"), m.get("method", "?"))
             counts[key][_status(d)] += 1
         print(f"Fair benchmark results under {args.results_root}\n")
-        print(f"{'family':<14}{'method':<26}{'complete':>9}{'partial':>9}{'empty':>7}")
-        tot = {"complete": 0, "partial": 0, "empty": 0}
+        print(f"{'family':<14}{'method':<26}{'complete':>9}{'partial':>9}{'empty':>7}{'skipped':>8}")
+        tot = {"complete": 0, "partial": 0, "empty": 0, "skipped": 0}
         for key in sorted(counts):
             c = counts[key]
             for k in tot:
                 tot[k] += c[k]
-            print(f"{key[0]:<14}{key[1]:<26}{c['complete']:>9}{c['partial']:>9}{c['empty']:>7}")
-        print("-" * 65)
-        print(f"{'TOTAL':<40}{tot['complete']:>9}{tot['partial']:>9}{tot['empty']:>7}")
+            print(f"{key[0]:<14}{key[1]:<26}{c['complete']:>9}{c['partial']:>9}{c['empty']:>7}{c['skipped']:>8}")
+        print("-" * 73)
+        print(f"{'TOTAL':<40}{tot['complete']:>9}{tot['partial']:>9}{tot['empty']:>7}{tot['skipped']:>8}")
         print(f"\n{len(docs)} result.json files found.")
         return 0
 
