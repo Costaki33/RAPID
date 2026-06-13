@@ -57,12 +57,13 @@ def load_rows():
         reps = [x for x in t.get("repeats", []) if x.get("success")]
         if not reps:
             continue
+        bucket = "oversub" if "/oversub/" in p else ("streaming" if "/streaming/" in p else "matrix")
         row = dict(
             family=m.get("family"), method=m.get("method"), model=m.get("model"),
             ds=m.get("dataset"), st=m.get("n_stations"), dev=m.get("device"),
             ncpu=m.get("n_cpus"), dtype=m.get("dtype"), comp=bool(m.get("compile")),
             bs=m.get("batch_size"), tag=m.get("tag", ""), regime=regime_of(m.get("tag", "")),
-            nrep=len(reps),
+            bucket=bucket, nrep=len(reps),
             total=sum(x["total_s"] for x in reps) / len(reps),
             total_std=t.get("total_s_std") or 0.0,
         )
@@ -429,6 +430,86 @@ def fig_dt_dist():
 
 
 # ---- Tables -----------------------------------------------------------------
+def table_completion():
+    # Target counts for the main matrix (from the scheduler builder).
+    TARGETS = {
+        ("matrix", "annotate"): 1536, ("matrix", "classify"): 384,
+        ("matrix", "slipstream"): 6912, ("matrix", "ripper"): 384,
+        ("matrix", "modelactor"): 384, ("matrix", "ripper_slipstream"): 4224,
+        ("matrix", "modelactor_slipstream"): 6912,
+        ("streaming", "stream_modelactor"): 96, ("streaming", "stream_modelactor_slipstream"): 432,
+        ("oversub", "ripper"): 128, ("oversub", "modelactor"): 128,
+        ("oversub", "ripper_slipstream"): 128, ("oversub", "modelactor_slipstream"): 128,
+    }
+    done = defaultdict(int)
+    dims = defaultdict(lambda: dict(dev=set(), ncpu=set(), dtype=set()))
+    for r in ROWS:
+        k = (r["bucket"], r["method"])
+        done[k] += 1
+        dims[k]["dev"].add(r["dev"]); dims[k]["ncpu"].add(r["ncpu"])
+        if r["dtype"]:
+            dims[k]["dtype"].add(r["dtype"])
+
+    def fmt(s):
+        return ",".join(str(x) for x in sorted(s)) if s else "–"
+
+    TBL.write("## T0. Trial completion by family and configuration\n\n")
+    TBL.write("Main matrix: 8 model-window-regime combos x 2 datasets (STEAD,TXED) x 2 station "
+              "counts (250,580) x 12 device points (6 CPU-core budgets + 6 GPU host-core budgets). "
+              "Native trials average 5 repeats; orchestration 1.\n\n")
+    TBL.write("| Phase | Strategy | Done | Target | % | Devices | CPU grid | Precisions |\n")
+    TBL.write("|---|---|---:|---:|---:|---|---|---|\n")
+    order = [("matrix", "annotate"), ("matrix", "classify"), ("matrix", "slipstream"),
+             ("matrix", "ripper"), ("matrix", "modelactor"),
+             ("matrix", "ripper_slipstream"), ("matrix", "modelactor_slipstream"),
+             ("streaming", "stream_modelactor"), ("streaming", "stream_modelactor_slipstream"),
+             ("oversub", "ripper"), ("oversub", "modelactor"),
+             ("oversub", "ripper_slipstream"), ("oversub", "modelactor_slipstream")]
+    tot_done = tot_tgt = 0
+    phase_label = {"matrix": "Main matrix", "streaming": "Latency sweep", "oversub": "Oversub sweep"}
+    for k in order:
+        d = done.get(k, 0)
+        tgt = TARGETS.get(k, 0)
+        tot_done += d; tot_tgt += tgt
+        pct = f"{100*d/tgt:.0f}%" if tgt else "–"
+        di = dims.get(k, dict(dev=set(), ncpu=set(), dtype=set()))
+        TBL.write(f"| {phase_label[k[0]]} | {k[1]} | {d} | {tgt} | {pct} | "
+                  f"{fmt(di['dev'])} | {fmt(di['ncpu'])} | {fmt(di['dtype'])} |\n")
+    TBL.write(f"| **All phases** | | **{tot_done}** | **{tot_tgt}** | "
+              f"**{100*tot_done/tot_tgt:.0f}%** | | | |\n\n")
+    TBL.write("Latency-sweep and oversub-sweep targets count only the portions launched so far "
+              "(CPU halves ran on the idle pool during the GPU matrix tail; GPU halves chain after).\n\n")
+
+
+def table_gpu_orchestration():
+    TBL.write("## T2b. Orchestration on GPU (mean total s, cold start; STEAD 580 st)\n\n")
+    TBL.write("| Model | Ripper | Model-Actor | Ripper+Slip FP32 | MA+Slip FP32 | MA+Slip best |\n")
+    TBL.write("|---|---:|---:|---:|---:|---:|\n")
+    any_data = False
+    for model in MODELS:
+        reg = canonical_regime(model)
+        cells = []
+        for flt in (dict(family="orchestration", method="ripper"),
+                    dict(family="orchestration", method="modelactor"),
+                    dict(family="orchestration", method="ripper_slipstream", dtype="fp32"),
+                    dict(family="orchestration", method="modelactor_slipstream", dtype="fp32"),
+                    dict(family="orchestration", method="modelactor_slipstream")):
+            cand = [r for r in sel(ROWS, model=model, ds="stead", st=580, dev="gpu", **flt)
+                    if r["regime"] == reg and r["bucket"] == "matrix"]
+            b = best(cand)
+            if b:
+                any_data = True
+                if flt.get("method") == "modelactor_slipstream" and "dtype" not in flt:
+                    cells.append(f"{b['total']:.1f} ({prec_label(b)})")
+                else:
+                    cells.append(f"{b['total']:.1f}")
+            else:
+                cells.append("–")
+        TBL.write(f"| {model} | " + " | ".join(cells) + " |\n")
+    TBL.write("\n" + ("" if any_data else "_(GPU orchestration trials still running.)_\n") +
+              "GPU cells: best over host-core budgets. Dashes = still running at asset-build time.\n\n")
+
+
 def table_native_baselines():
     TBL.write("## T1. Native single-process baselines (mean total s, cold start; STEAD)\n\n")
     TBL.write("| Model | Method | 250 st CPU20 | 580 st CPU20 | 250 st GPU | 580 st GPU |\n")
@@ -535,8 +616,10 @@ fig_latency()
 fig_timing_dist()
 fig_f1_dist()
 fig_dt_dist()
+table_completion()
 table_native_baselines()
 table_orchestration()
+table_gpu_orchestration()
 table_pick_quality()
 table_latency()
 TBL.close()
