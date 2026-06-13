@@ -37,7 +37,7 @@ fi
 exec python3 scripts/run_fair_scheduler.py \
     --family oversub \
     --oversub-cpu-grid 5,10,15,20 \
-    --oversub-multipliers 1,2,3,4 \
+    --oversub-multipliers 0.25,0.5,1,2,3,4 \
     --oversub-repeats 3 \
     --datasets stead \
     --stations 580 \

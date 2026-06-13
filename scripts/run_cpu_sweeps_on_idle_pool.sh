@@ -44,7 +44,7 @@ log "latency sweep CPU portion done (rc=$?)"
 
 log "Phase 2/2: oversubscription sweep (CPU-only portion)"
 python3 scripts/run_fair_scheduler.py \
-    --family oversub --oversub-cpu-grid 5,10,15,20 --oversub-multipliers 1,2,3,4 \
+    --family oversub --oversub-cpu-grid 5,10,15,20 --oversub-multipliers 0.25,0.5,1,2,3,4 \
     --oversub-repeats 3 --datasets stead --stations 580 \
     --total-cpus 120 --num-gpus 2 --no-sweep-gpu
 log "oversub sweep CPU portion done (rc=$?)"

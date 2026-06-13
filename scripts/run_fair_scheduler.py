@@ -331,6 +331,38 @@ def build_stream_trials(args) -> List[Trial]:
     return trials
 
 
+def _oversub_conc(mult: float, n_cpus: int, n_st: int) -> int:
+    """Requested concurrency = round-half-up(mult x cores), floored at 1, capped at stations.
+
+    Half-up (``floor(x + 0.5)``) is the conventional "nearest", so 0.25x5=1.25->1
+    and 0.5x5=2.5->3; the floor of 1 keeps sub-1x multipliers from requesting an
+    empty pool.
+    """
+    import math
+
+    return max(1, min(int(math.floor(mult * n_cpus + 0.5)), n_st))
+
+
+def _oversub_mult_tag(mult: float) -> str:
+    """Filesystem-safe multiplier tag: 1.0->"1", 0.25->"0p25", 0.5->"0p5"."""
+    if mult == int(mult):
+        return str(int(mult))
+    return ("%g" % mult).replace(".", "p")
+
+
+def _oversub_precisions(strategy: str, model: str):
+    """(dtype, prec-tag) list for an oversub trial.
+
+    Only the slipstream strategies have a precision choice; ripper/modelactor run
+    native ``classify()`` at fp32. Slipstream sweeps the model's supported
+    precisions WITHOUT compile (fp32/fp16/bf16 for the PhaseNet family;
+    fp32/bf16 for EQT, whose attention mask overflows fp16).
+    """
+    if strategy not in ORCH_SLIPSTREAM_STRATEGIES:
+        return [("fp32", "fp32")]
+    return [(dt, pt) for dt, comp, pt in _slipstream_specs(model) if not comp]
+
+
 def build_oversub_trials(args) -> List[Trial]:
     """Oversubscription sweep: concurrency = multiplier x cores at fixed core budgets.
 
@@ -338,14 +370,15 @@ def build_oversub_trials(args) -> List[Trial]:
     bound to CPUs (Ray ``num_cpus=0``; only the trial's affinity mask limits
     which cores run), so in-flight tasks may exceed the core budget until the
     RAM cap (CPU mode) or VRAM cap (GPU mode) binds. Each trial requests
-    ``concurrency = mult * n_cpus`` on a fixed pinned core block; the repeat
-    records carry requested ``concurrency`` vs achieved ``n_modelactors`` so
-    capping is visible in the data.
+    ``concurrency = round(mult * n_cpus)`` on a fixed pinned core block; the
+    repeat records carry requested ``concurrency`` vs achieved ``n_modelactors``
+    so capping is visible in the data.
 
-    Kept about ONE variable: a single canonical window regime per model
-    (w6000ov03 for the PhaseNet family, w6000 for EQT) and fp32/bs256 for the
-    slipstream strategies. Results land under ``<results-root>/oversub/`` so
-    they never mix with the main matrix.
+    Two swept axes: the multiplier grid (sub-1x through 4x, so we see both
+    under- and over-subscription) and precision (fp32/fp16/bf16 per model, for
+    the slipstream strategies only). One canonical window regime per model
+    (w6000ov03 for the PhaseNet family, w6000 for EQT), bs256. Results land
+    under ``<results-root>/oversub/`` so they never mix with the main matrix.
     """
     trials: List[Trial] = []
     runner = RAPID_ROOT / "scripts" / "run_fair_orch_trial.py"
@@ -364,41 +397,43 @@ def build_oversub_trials(args) -> List[Trial]:
         for strategy in ORCH_STRATEGIES:
             slip = strategy in ORCH_SLIPSTREAM_STRATEGIES
             btag = "_bs256" if slip else ""
-            for dataset in (args.datasets or DATASETS):
-                for n_st in (args.stations or STATION_COUNTS):
-                    for dev_kind, n_cpus in devices:
-                        gpu = dev_kind == "gpu"
-                        dtag = f"gpu_cpu{n_cpus}" if gpu else f"cpu{n_cpus}"
-                        for mult in args.oversub_multipliers:
-                            conc = min(int(mult) * n_cpus, n_st)
-                            tag = f"oversub_{strategy}_{wtag}_fp32{btag}_c{mult}x_{dtag}"
-                            base = (results_root / "orchestration" / strategy / dataset.lower()
-                                    / f"{n_st}st" / model / tag)
-                            cmd = [
-                                py, str(runner),
-                                "--strategy", strategy,
-                                "--dataset", dataset,
-                                "--n-stations", str(n_st),
-                                "--model", model,
-                                "--device", dev_kind,
-                                "--n-cpus", str(n_cpus),
-                                "--concurrency", str(conc),
-                                "--in-samples", str(in_samples),
-                                "--overlap-samples", str(overlap),
-                                "--net-suffix", net_suffix,
-                                "--dtype", "fp32",
-                                "--slipstream-batch-size", "256",
-                                "--repeats", str(args.oversub_repeats),
-                                "--tag", tag,
-                                "--net-root", str(args.net_root),
-                                "--results-root", str(results_root),
-                                "--resume",
-                            ]
-                            trials.append(Trial(
-                                trial_id=f"oversub/{strategy}/{dataset}/{n_st}st/{model}/{tag}",
-                                cmd=cmd, n_cpus=n_cpus, needs_gpu=gpu,
-                                result_path=base / "result.json", repeats=args.oversub_repeats,
-                            ))
+            for dtype, ptag in _oversub_precisions(strategy, model):
+                for dataset in (args.datasets or DATASETS):
+                    for n_st in (args.stations or STATION_COUNTS):
+                        for dev_kind, n_cpus in devices:
+                            gpu = dev_kind == "gpu"
+                            dtag = f"gpu_cpu{n_cpus}" if gpu else f"cpu{n_cpus}"
+                            for mult in args.oversub_multipliers:
+                                conc = _oversub_conc(mult, n_cpus, n_st)
+                                mtag = _oversub_mult_tag(mult)
+                                tag = f"oversub_{strategy}_{wtag}_{ptag}{btag}_c{mtag}x_{dtag}"
+                                base = (results_root / "orchestration" / strategy / dataset.lower()
+                                        / f"{n_st}st" / model / tag)
+                                cmd = [
+                                    py, str(runner),
+                                    "--strategy", strategy,
+                                    "--dataset", dataset,
+                                    "--n-stations", str(n_st),
+                                    "--model", model,
+                                    "--device", dev_kind,
+                                    "--n-cpus", str(n_cpus),
+                                    "--concurrency", str(conc),
+                                    "--in-samples", str(in_samples),
+                                    "--overlap-samples", str(overlap),
+                                    "--net-suffix", net_suffix,
+                                    "--dtype", dtype,
+                                    "--slipstream-batch-size", "256",
+                                    "--repeats", str(args.oversub_repeats),
+                                    "--tag", tag,
+                                    "--net-root", str(args.net_root),
+                                    "--results-root", str(results_root),
+                                    "--resume",
+                                ]
+                                trials.append(Trial(
+                                    trial_id=f"oversub/{strategy}/{dataset}/{n_st}st/{model}/{tag}",
+                                    cmd=cmd, n_cpus=n_cpus, needs_gpu=gpu,
+                                    result_path=base / "result.json", repeats=args.oversub_repeats,
+                                ))
     return trials
 
 
@@ -573,8 +608,9 @@ def main() -> int:
     ap.add_argument("--stream-interval-s", type=float, default=60.0)
     ap.add_argument("--oversub-cpu-grid", default="5,10,15,20",
                     help="Core budgets for the oversubscription sweep (--family oversub).")
-    ap.add_argument("--oversub-multipliers", default="1,2,3,4",
-                    help="Requested concurrency = multiplier x cores (--family oversub).")
+    ap.add_argument("--oversub-multipliers", default="0.25,0.5,1,2,3,4",
+                    help="Requested concurrency = round(multiplier x cores) (--family oversub). "
+                         "Fractional values probe under-subscription; >1 over-subscription.")
     ap.add_argument("--oversub-repeats", type=int, default=3)
     ap.add_argument("--models", default=None, help="Comma list; default all 4")
     ap.add_argument("--datasets", default=None, help="Comma list; default stead,txed")
@@ -608,7 +644,7 @@ def main() -> int:
     args.cpu_grid = [int(c) for c in args.cpu_grid.split(",") if c.strip()]
     args.batch_sizes = [int(b) for b in args.batch_sizes.split(",") if b.strip()]
     args.oversub_cpu_grid = [int(c) for c in args.oversub_cpu_grid.split(",") if c.strip()]
-    args.oversub_multipliers = [int(m) for m in args.oversub_multipliers.split(",") if m.strip()]
+    args.oversub_multipliers = [float(m) for m in args.oversub_multipliers.split(",") if m.strip()]
     if args.models:
         args.models = [m.strip() for m in args.models.split(",") if m.strip()]
     if args.datasets:
