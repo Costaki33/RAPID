@@ -38,7 +38,7 @@ log "main matrix tail is GPU-only; CPU pool [40,120) is free. Starting CPU-only 
 log "Phase 1/2: latency sweep (CPU-only portion)"
 python3 scripts/run_fair_scheduler.py \
     --family streaming --stream-interval-s 0 --stream-feeds 8 --stream-repeats 3 \
-    --datasets stead --batch-sizes 256 --cpu-grid 5,11,20 \
+    --datasets stead --batch-sizes 256 --cpu-grid 5,10,15,20 \
     --total-cpus 120 --num-gpus 2 --no-sweep-gpu
 log "latency sweep CPU portion done (rc=$?)"
 

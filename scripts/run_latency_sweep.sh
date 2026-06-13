@@ -39,7 +39,7 @@ exec python3 scripts/run_fair_scheduler.py \
     --stream-repeats 3 \
     --datasets stead \
     --batch-sizes 256 \
-    --cpu-grid 5,11,20 \
+    --cpu-grid 5,10,15,20 \
     --total-cpus 120 \
     --num-gpus 2 \
     "$@"
