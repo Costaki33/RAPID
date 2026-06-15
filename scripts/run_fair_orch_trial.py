@@ -661,7 +661,11 @@ def main() -> int:
     ap.add_argument("--tag", required=True)
     ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
-    ap.add_argument("--tmp-dir", type=Path, default=EQCCTPRO_ROOT / "tmp_ray")
+    # Ray temp dir. MUST be short: Ray's AF_UNIX socket paths cap at 107 bytes,
+    # and the vendored repo path is long enough that eqcctpro would silently fall
+    # back to /tmp/eqcctpro_ray (small root fs) and fill it. A short ~/rapid_ray
+    # keeps Ray sessions on /home (large fs).
+    ap.add_argument("--tmp-dir", type=Path, default=Path.home() / "rapid_ray")
     ap.add_argument("--repeat-index", type=int, default=-1)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--dedup-vram-capped", action="store_true",

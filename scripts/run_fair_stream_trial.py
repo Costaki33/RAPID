@@ -595,7 +595,9 @@ def main() -> int:
     ap.add_argument("--tag", required=True)
     ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
-    ap.add_argument("--tmp-dir", type=Path, default=EQCCTPRO_ROOT / "tmp_ray")
+    # Short Ray temp dir on /home (see run_fair_orch_trial.py): the long vendored
+    # path overflows Ray's 107-byte AF_UNIX socket limit and falls back to /tmp.
+    ap.add_argument("--tmp-dir", type=Path, default=Path.home() / "rapid_ray")
     ap.add_argument("--repeat-index", type=int, default=-1)
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
