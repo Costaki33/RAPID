@@ -14,6 +14,10 @@ cd /home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/RAPID
 
 log() { echo "[$(date -Is)] $*"; }
 
+# Run the wedge/disk guards first (also scheduled standalone every 30 min via
+# benchmark_watchdog.sh; harmless to run again here).
+./scripts/benchmark_watchdog.sh >> results/fair_benchmark/watchdog.log 2>&1 || true
+
 if pgrep -f "run_fair_scheduler.py" >/dev/null 2>&1; then
     if pgrep -af "run_fair_scheduler.py" | grep -q -- "--family oversub"; then
         log "oversub sweep running: $(grep -o '\[done [0-9]*/[0-9]*\]' results/fair_benchmark/oversub_sweep.log 2>/dev/null | tail -1)"
