@@ -18,11 +18,15 @@
 # in-flight clamp is bypassed when --concurrency is explicit, and VRAM/RAM-cap-
 # redundant trials self-skip (result.json skipped=true) to save compute.
 #
-# SINGLE GPU (--num-gpus 1): the GPU half runs strictly one trial at a time on
-# one physical GPU, so each oversubscription point owns the full GPU's VRAM with
-# no co-tenant -- the cleanest measurement of concurrency-vs-VRAM, and it closes
-# the dedup race (every redundant high-multiplier trial is skipped). GPU1 stays
-# idle during this phase by design.
+# DEDICATED GPU PER TRIAL, BOTH GPUS USED (--num-gpus 2): the scheduler pins
+# each GPU trial to ONE physical GPU via CUDA_VISIBLE_DEVICES, so every
+# oversubscription point still owns a full GPU's VRAM with no co-tenant -- the
+# VRAM cap each trial sees is one whole 49 GB GPU, identical to a single-GPU run.
+# But because the two GPUs are independent, two trials run concurrently (one per
+# GPU) for ~2x throughput on the GPU half. The only cost is the dedup race: two
+# siblings of the same group may run at once and miss a skip (harmless -- valid
+# duplicate data, never wrong); submission order runs lower multipliers first so
+# the cap is usually established before the higher ones dispatch.
 #
 # Results: results/fair_benchmark/oversub/orchestration/... (never mixed with
 # the main matrix). Resume-safe: re-run this script after any stop.
@@ -50,5 +54,5 @@ exec python3 scripts/run_fair_scheduler.py \
     --datasets stead \
     --stations 580 \
     --total-cpus 120 \
-    --num-gpus 1 \
+    --num-gpus 2 \
     "$@"
