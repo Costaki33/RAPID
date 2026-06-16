@@ -145,11 +145,22 @@ def load():
 
 
 def running_now():
-    """Parse `ps` for active per-repeat trial workers -> list of (gpu/cpu, strategy, model)."""
+    """Parse `ps` for active trial DRIVERS -> list of (slot, strategy, model).
+
+    Each running trial has one long-lived driver (run_fair_*trial.py WITHOUT
+    --repeat-index) that spawns short-lived repeat subprocesses. We key on the
+    driver so a trial shows as 'running' through its whole lifetime, including
+    the driver-only setup/model-load gaps between repeats (where keying on the
+    repeat would miss it). The driver carries --gpu-id, so it also tells us which
+    GPU slot is occupied -- more meaningful than instantaneous nvidia-smi, which
+    reads idle during a trial's CPU-bound preprocess/load phases.
+    """
     out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
     active = []
     for line in out.splitlines():
-        if "--repeat-index" not in line or "run_fair_" not in line:
+        if "run_fair_" not in line or "trial.py" not in line:
+            continue
+        if "--repeat-index" in line:   # skip the inner repeat; count its driver
             continue
         toks = line.split()
         def val(flag):
@@ -169,7 +180,7 @@ def best(rows, **kw):
     return min(out, key=lambda r: r[key]) if out else None
 
 
-def health():
+def health(act):
     scheds = subprocess.run(["pgrep", "-fc", "run_fair_scheduler.py"], capture_output=True, text=True).stdout.strip()
     line = f"schedulers={scheds}"
     for fs in ("/", "/home"):
@@ -178,26 +189,23 @@ def health():
             line += f"  {fs}={100*u.used//u.total}%"
         except Exception:
             pass
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid", "--format=csv,noheader"],
-                             capture_output=True, text=True, timeout=10).stdout
-        gpus = len(set(x.strip() for x in out.splitlines() if x.strip()))
-        line += f"  GPUs-in-use={gpus}/2"
-    except Exception:
-        pass
+    # GPU slots occupied by a running trial (from driver --gpu-id), which is
+    # stable across a trial's CPU-bound phases -- unlike instantaneous nvidia-smi.
+    gpu_slots = len({slot for slot, _, _ in act if slot.startswith("GPU")})
+    line += f"  GPU-slots-busy={gpu_slots}/2"
     return line
 
 
 def main():
     rows, done, rate = load()
-    print(f"FAIR BENCHMARK  {time.strftime('%a %Y-%m-%d %H:%M:%S')}   {health()}")
+    act = running_now()
+    print(f"FAIR BENCHMARK  {time.strftime('%a %Y-%m-%d %H:%M:%S')}   {health(act)}")
 
     # --- Running now (which strategy/model on each slot) ---
-    act = running_now()
     if act:
         summary = "  ".join(f"{slot}:{strat}/{model}" for slot, strat, model in act)
     else:
-        summary = "(no trial workers active)"
+        summary = "(scheduler between dispatches -- no driver active this instant)"
     print(f"RUNNING NOW ({len(act)}): {summary}")
     print("=" * 92)
 
