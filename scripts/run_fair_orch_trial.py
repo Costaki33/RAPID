@@ -236,7 +236,12 @@ def run_one_repeat(args) -> int:
 
     flags = _strategy_flags(args.strategy, args.dtype, args.compile)
     physical_gpu = int(getattr(args, "gpu_id", 0) or 0)
-    gpus = [0] if gpu else None
+    # Use the PHYSICAL GPU the scheduler assigned (via --gpu-id). eqcctpro sets
+    # CUDA_VISIBLE_DEVICES from selected_gpus, so passing [0] unconditionally
+    # forced EVERY orchestration GPU trial onto physical GPU 0 (GPU1 idle, and
+    # two concurrent trials sharing GPU0). Passing the assigned id sends each
+    # trial to its own GPU, so the two scheduler GPU slots use both devices.
+    gpus = [physical_gpu] if gpu else None
     # Force the per-window overlap so orchestration windows == native windows.
     # For single-window regimes (trace == in_samples) overlap is a no-op (1 window).
     sb_overlap = int(args.overlap_samples)
