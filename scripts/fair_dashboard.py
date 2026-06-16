@@ -112,6 +112,8 @@ def load():
     new_cache = {}
     rows = []
     done = defaultdict(int)
+    rate = defaultdict(int)   # completions in the last hour, by (bucket, method)
+    now = time.time()
     for p in paths:
         try:
             mt = os.path.getmtime(p)
@@ -128,6 +130,8 @@ def load():
         new_cache[p] = {"mt": mt, "b": b, "meth": meth, "ok": ok, "row": row}
         if ok:
             done[(b, meth)] += 1
+            if mt > now - 3600:   # result.json mtime ~ completion time
+                rate[(b, meth)] += 1
         if row:
             rows.append(row)
     try:
@@ -136,7 +140,26 @@ def load():
         os.replace(tmp, CACHE)
     except Exception:
         pass
-    return rows, done
+    return rows, done, rate
+
+
+def running_now():
+    """Parse `ps` for active per-repeat trial workers -> list of (gpu/cpu, strategy, model)."""
+    out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    active = []
+    for line in out.splitlines():
+        if "--repeat-index" not in line or "run_fair_" not in line:
+            continue
+        toks = line.split()
+        def val(flag):
+            return toks[toks.index(flag) + 1] if flag in toks else None
+        strat = val("--strategy") or val("--method") or "?"
+        model = val("--model") or "?"
+        gid = val("--gpu-id")
+        dev = val("--device") or ""
+        slot = f"GPU{gid}" if (gid is not None and dev == "gpu") else "CPU"
+        active.append((slot, strat, model))
+    return sorted(active)
 
 
 def best(rows, **kw):
@@ -165,26 +188,43 @@ def health():
 
 
 def main():
-    rows, done = load()
+    rows, done, rate = load()
     print(f"FAIR BENCHMARK  {time.strftime('%a %Y-%m-%d %H:%M:%S')}   {health()}")
+
+    # --- Running now (which strategy/model on each slot) ---
+    act = running_now()
+    if act:
+        summary = "  ".join(f"{slot}:{strat}/{model}" for slot, strat, model in act)
+    else:
+        summary = "(no trial workers active)"
+    print(f"RUNNING NOW ({len(act)}): {summary}")
     print("=" * 92)
 
     # --- Completion table ---
-    print(f"{'Phase':13s} {'Strategy':26s} {'Done':>6s} {'Target':>7s} {'%':>5s}  {'progress':<20s}")
-    gd = gt = 0
+    print(f"{'Phase':13s} {'Strategy':26s} {'Done':>6s} {'Target':>7s} {'%':>5s} {'/hr':>4s}  {'progress':<18s}")
+    gd = gt = grate = 0
     last = None
     for k in ORDER:
         tgt = TARGETS.get(k, 0)
         d = min(done.get(k, 0), tgt)
-        gd += d; gt += tgt
+        rt = rate.get(k, 0)
+        gd += d; gt += tgt; grate += rt
         pct = (100 * d // tgt) if tgt else 0
         bar = "#" * (pct * 18 // 100) + "." * (18 - pct * 18 // 100)
         ph = PHASE_LABEL[k[0]] if k[0] != last else ""
         last = k[0]
-        print(f"{ph:13s} {k[1]:26s} {d:6d} {tgt:7d} {pct:4d}%  [{bar}]")
+        rstr = str(rt) if rt else ("." if d < tgt else "")
+        print(f"{ph:13s} {k[1]:26s} {d:6d} {tgt:7d} {pct:4d}% {rstr:>4s}  [{bar}]")
+    pct = 100 * gd // gt if gt else 0
     pct = 100 * gd // gt if gt else 0
     print("-" * 92)
-    print(f"{'TOTAL':13s} {'':26s} {gd:6d} {gt:7d} {pct:4d}%")
+    eta = ""
+    if grate > 0 and gt > gd:
+        hrs = (gt - gd) / grate
+        eta = f"   ~{hrs:.0f}h left at {grate}/hr" if hrs < 72 else f"   ~{hrs/24:.1f}d left at {grate}/hr"
+    print(f"{'TOTAL':13s} {'':26s} {gd:6d} {gt:7d} {pct:4d}% {grate:>4d}{eta}")
+    print("(/hr = trials completed in the last hour; '.' = pending, none finished this hour -- "
+          "queued behind another strategy, not stuck)")
     print()
 
     # --- Headline results: STEAD 580 st, per method, CPU + GPU ---
