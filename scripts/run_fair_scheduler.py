@@ -84,10 +84,15 @@ def _slipstream_specs(model: str):
     precs += [("bf16", False, "bf16"), ("bf16", True, "bf16_compile")]
     return precs
 
-# Orchestration strategies (eqcctpro). The *_slipstream strategies sweep
+# Orchestration strategies (eqcctpro). modelactor_slipstream sweeps
 # precision x batch; ripper/modelactor run SeisBench classify() end-to-end at
-# fp32 (no batch dimension).
-ORCH_STRATEGIES = ["ripper", "ripper_slipstream", "modelactor", "modelactor_slipstream"]
+# fp32 (no batch dimension). ripper_slipstream was dropped 2026-06-16: Ripper is
+# the non-recommended baseline and its slipstream variant (per-task model reload
+# on the lean path) is the slowest, least-deployable config -- ripper (plain
+# classify) already establishes the Ripper baseline. Kept in
+# ORCH_SLIPSTREAM_STRATEGIES so the `slip` flag still classifies correctly if it
+# ever reappears, but it is no longer built.
+ORCH_STRATEGIES = ["ripper", "modelactor", "modelactor_slipstream"]
 ORCH_SLIPSTREAM_STRATEGIES = {"ripper_slipstream", "modelactor_slipstream"}
 
 # Streaming (warm Model-Actor) strategies: 4 paced feeds, actors stay alive.

@@ -29,20 +29,21 @@ RES = ROOT / "results" / "fair_benchmark"
 MODELS = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC"]
 
 # Per-strategy targets (stable; see scripts/run_fair_scheduler.py builders).
+# ripper_slipstream dropped 2026-06-16 (see run_fair_scheduler.py).
 TARGETS = {
     ("matrix", "annotate"): 1536, ("matrix", "classify"): 384, ("matrix", "slipstream"): 6912,
     ("matrix", "ripper"): 384, ("matrix", "modelactor"): 384,
-    ("matrix", "ripper_slipstream"): 4224, ("matrix", "modelactor_slipstream"): 6912,
+    ("matrix", "modelactor_slipstream"): 6912,
     ("latency", "stream_modelactor"): 128, ("latency", "stream_modelactor_slipstream"): 576,
     ("oversub", "ripper"): 192, ("oversub", "modelactor"): 192,
-    ("oversub", "ripper_slipstream"): 480, ("oversub", "modelactor_slipstream"): 480,
+    ("oversub", "modelactor_slipstream"): 480,
 }
 PHASE_LABEL = {"matrix": "Main matrix", "latency": "Latency sweep", "oversub": "Oversub sweep"}
 ORDER = (
     [("matrix", m) for m in ("annotate", "classify", "slipstream", "ripper", "modelactor",
-                             "ripper_slipstream", "modelactor_slipstream")]
+                             "modelactor_slipstream")]
     + [("latency", m) for m in ("stream_modelactor", "stream_modelactor_slipstream")]
-    + [("oversub", m) for m in ("ripper", "modelactor", "ripper_slipstream", "modelactor_slipstream")]
+    + [("oversub", m) for m in ("ripper", "modelactor", "modelactor_slipstream")]
 )
 
 
@@ -236,7 +237,6 @@ def main():
         ("slipstream bf16", dict(method="slipstream", dtype="bf16")),
         ("ripper", dict(method="ripper")),
         ("modelactor", dict(method="modelactor")),
-        ("ripper+slip bf16", dict(method="ripper_slipstream", dtype="bf16")),
         ("MA+slip bf16", dict(method="modelactor_slipstream", dtype="bf16")),
     ]
     for dev in ("cpu", "gpu"):
