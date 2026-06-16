@@ -23,10 +23,11 @@
 # oversubscription point still owns a full GPU's VRAM with no co-tenant -- the
 # VRAM cap each trial sees is one whole 49 GB GPU, identical to a single-GPU run.
 # But because the two GPUs are independent, two trials run concurrently (one per
-# GPU) for ~2x throughput on the GPU half. The only cost is the dedup race: two
-# siblings of the same group may run at once and miss a skip (harmless -- valid
-# duplicate data, never wrong); submission order runs lower multipliers first so
-# the cap is usually established before the higher ones dispatch.
+# GPU) for ~2x throughput on the GPU half. The dedup race is fully closed by the
+# scheduler's group-aware dispatch: two trials of the same dedup group (same
+# model/strategy/precision/host-budget, differing only in multiplier) never run
+# at once, so the cap-establishing low multipliers always complete before higher
+# ones dispatch -- while DIFFERENT groups still parallelize across both GPUs.
 #
 # Results: results/fair_benchmark/oversub/orchestration/... (never mixed with
 # the main matrix). Resume-safe: re-run this script after any stop.

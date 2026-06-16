@@ -107,6 +107,12 @@ class Trial:
     needs_gpu: bool
     result_path: Path
     repeats: int
+    # Trials sharing a dedup_group (oversub: same model/strategy/precision/host-
+    # budget/device, differing only in the concurrency multiplier) are never run
+    # concurrently, so the VRAM/RAM-cap dedup always sees completed lower-
+    # multiplier siblings -- closing the dedup race while still parallelizing
+    # DIFFERENT groups across GPUs. None -> no constraint.
+    dedup_group: Optional[str] = None
     # runtime state
     cores: List[int] = field(default_factory=list)
     gpu_index: Optional[int] = None
@@ -434,10 +440,18 @@ def build_oversub_trials(args) -> List[Trial]:
                                     "--resume",
                                     "--dedup-vram-capped",
                                 ]
+                                # Dedup group = everything but the multiplier
+                                # (matches _vram_capped_redundant's match key,
+                                # which requires the SAME host-CPU budget), so the
+                                # cap-establishing low multipliers complete before
+                                # higher ones in the same group dispatch. Different
+                                # host budgets are distinct groups -> still parallel.
+                                group = f"oversub|{strategy}|{model}|{dataset}|{n_st}|{dev_kind}|{ptag}|c{n_cpus}"
                                 trials.append(Trial(
                                     trial_id=f"oversub/{strategy}/{dataset}/{n_st}st/{model}/{tag}",
                                     cmd=cmd, n_cpus=n_cpus, needs_gpu=gpu,
                                     result_path=base / "result.json", repeats=args.oversub_repeats,
+                                    dedup_group=group,
                                 ))
     return trials
 
@@ -551,12 +565,19 @@ class Scheduler:
             progressed = True
             while progressed:
                 progressed = False
+                running_groups = {r.dedup_group for r in running if r.dedup_group}
                 for t in list(pending):
+                    # Never run two trials of the same dedup group at once (keeps
+                    # the oversub cap-dedup race-free); different groups still
+                    # parallelize across slots.
+                    if t.dedup_group and t.dedup_group in running_groups:
+                        continue
                     if self._can_dispatch(t):
                         self._alloc(t)
                         self._launch(t)
                         pending.remove(t)
                         running.append(t)
+                        running_groups.add(t.dedup_group) if t.dedup_group else None
                         progressed = True
             # Wait for any to finish.
             time.sleep(self.poll_s)
