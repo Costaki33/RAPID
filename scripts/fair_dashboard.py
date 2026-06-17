@@ -181,7 +181,11 @@ def best(rows, **kw):
 
 
 def health(act):
-    scheds = subprocess.run(["pgrep", "-fc", "run_fair_scheduler.py"], capture_output=True, text=True).stdout.strip()
+    # Count real python scheduler processes (ps args), not `pgrep -f` which
+    # self-matches transient shells whose command line contains the pattern.
+    ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    scheds = sum(1 for ln in ps.splitlines()
+                 if "run_fair_scheduler.py" in ln and "python" in ln and "grep" not in ln)
     line = f"schedulers={scheds}"
     for fs in ("/", "/home"):
         try:
