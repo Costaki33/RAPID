@@ -33,10 +33,10 @@ MODELS = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC"]
 TARGETS = {
     ("matrix", "annotate"): 1536, ("matrix", "classify"): 384, ("matrix", "slipstream"): 6912,
     ("matrix", "ripper"): 384, ("matrix", "modelactor"): 384,
-    ("matrix", "modelactor_slipstream"): 6912,
+    ("matrix", "modelactor_slipstream"): 3072,   # fp32+bf16 only (fp16/compile dropped 2026-06-16)
     ("latency", "stream_modelactor"): 128, ("latency", "stream_modelactor_slipstream"): 576,
     ("oversub", "ripper"): 192, ("oversub", "modelactor"): 192,
-    ("oversub", "modelactor_slipstream"): 480,
+    ("oversub", "modelactor_slipstream"): 384,
 }
 PHASE_LABEL = {"matrix": "Main matrix", "latency": "Latency sweep", "oversub": "Oversub sweep"}
 ORDER = (

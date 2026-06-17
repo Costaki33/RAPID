@@ -236,13 +236,15 @@ def build_orch_trials(args) -> List[Trial]:
             for strategy in (args.orch_strategies or ORCH_STRATEGIES):
                 slip = strategy in ORCH_SLIPSTREAM_STRATEGIES
                 precs = _slipstream_specs(model) if slip else [("fp32", False, "fp32")]
-                # Ripper re-loads (and would re-compile) the model inside EVERY
-                # station task, so torch.compile costs are paid per task -- a
-                # configuration nobody would deploy. Dropped 2026-06-11 to cut
-                # ~2,700 of the slowest trials; Model-Actor keeps its compile
-                # variants (compiled once per persistent actor).
-                if strategy == "ripper_slipstream":
-                    precs = [p for p in precs if not p[1]]
+                # modelactor_slipstream sweeps fp32 + bf16 only (no fp16, no
+                # compile). The full precision x compile curve of the lean path is
+                # already mapped by the native `slipstream` family; this strategy
+                # only needs to show the lean path survives the actor pool, which
+                # fp32 (baseline) + bf16 (recommended) establishes. fp16 (a known
+                # trap) and compile (0-2% gain) would just replicate native data.
+                # (Dropped 2026-06-16; ripper_slipstream was removed entirely.)
+                if slip:
+                    precs = [p for p in precs if not p[1] and p[0] != "fp16"]
                 batches = args.batch_sizes if slip else [256]
                 for dataset in (args.datasets or DATASETS):
                     for n_st in (args.stations or STATION_COUNTS):
@@ -369,13 +371,13 @@ def _oversub_precisions(strategy: str, model: str):
     """(dtype, prec-tag) list for an oversub trial.
 
     Only the slipstream strategies have a precision choice; ripper/modelactor run
-    native ``classify()`` at fp32. Slipstream sweeps the model's supported
-    precisions WITHOUT compile (fp32/fp16/bf16 for the PhaseNet family;
-    fp32/bf16 for EQT, whose attention mask overflows fp16).
+    native ``classify()`` at fp32. Slipstream sweeps fp32 + bf16 only (no fp16,
+    no compile) -- matching the main-matrix modelactor_slipstream set, since the
+    native slipstream family already characterizes fp16/compile.
     """
     if strategy not in ORCH_SLIPSTREAM_STRATEGIES:
         return [("fp32", "fp32")]
-    return [(dt, pt) for dt, comp, pt in _slipstream_specs(model) if not comp]
+    return [(dt, pt) for dt, comp, pt in _slipstream_specs(model) if not comp and dt != "fp16"]
 
 
 def build_oversub_trials(args) -> List[Trial]:
