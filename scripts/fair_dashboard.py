@@ -34,7 +34,7 @@ TARGETS = {
     ("matrix", "annotate"): 1536, ("matrix", "classify"): 384, ("matrix", "slipstream"): 6912,
     ("matrix", "ripper"): 384, ("matrix", "modelactor"): 384,
     ("matrix", "modelactor_slipstream"): 1536,   # bf16 only (fp32/fp16/compile dropped 2026-06-16)
-    ("latency", "stream_modelactor"): 128, ("latency", "stream_modelactor_slipstream"): 576,
+    ("latency", "stream_modelactor"): 128, ("latency", "stream_modelactor_slipstream"): 256,  # fp32+bf16 only
     ("oversub", "ripper"): 192, ("oversub", "modelactor"): 192,
     ("oversub", "modelactor_slipstream"): 192,
 }

@@ -305,6 +305,11 @@ def build_stream_trials(args) -> List[Trial]:
             for strategy in (args.stream_strategies or STREAM_STRATEGIES):
                 slip = strategy == "stream_modelactor_slipstream"
                 precs = _slipstream_specs(model) if slip else [("fp32", False, "fp32")]
+                # Warm-latency slipstream: fp32 (warm baseline) + bf16 (recommended)
+                # only -- no fp16/compile (native slipstream already characterizes
+                # them; trimmed 2026-06-17 to match the orchestration cut).
+                if slip:
+                    precs = [p for p in precs if not p[1] and p[0] != "fp16"]
                 batches = args.batch_sizes if slip else [256]
                 for dataset in (args.datasets or DATASETS):
                     for n_st in (args.stations or STATION_COUNTS):
