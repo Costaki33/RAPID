@@ -184,8 +184,11 @@ def health(act):
     # Count real python scheduler processes (ps args), not `pgrep -f` which
     # self-matches transient shells whose command line contains the pattern.
     ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+    # Count the actual python interpreter running the scheduler -- exclude `grep`
+    # and any `bash -c ...` launcher wrapper that also carries the script name.
     scheds = sum(1 for ln in ps.splitlines()
-                 if "run_fair_scheduler.py" in ln and "python" in ln and "grep" not in ln)
+                 if "run_fair_scheduler.py" in ln and "grep" not in ln
+                 and ln.lstrip().split(None, 1)[0].rsplit("/", 1)[-1].startswith("python"))
     line = f"schedulers={scheds}"
     for fs in ("/", "/home"):
         try:
