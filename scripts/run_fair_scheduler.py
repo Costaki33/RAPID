@@ -94,6 +94,12 @@ def _slipstream_specs(model: str):
 # ever reappears, but it is no longer built.
 ORCH_STRATEGIES = ["ripper", "modelactor", "modelactor_slipstream"]
 ORCH_SLIPSTREAM_STRATEGIES = {"ripper_slipstream", "modelactor_slipstream"}
+# Oversub sweep maps concurrency vs the memory cap, which is fundamentally about
+# the persistent actor pool -- so it runs the actor strategies only. Ripper
+# (ephemeral task queue, the non-recommended baseline) is excluded: its oversub
+# curve is the least central and by far the slowest (per-task GPU model reload).
+# Dropped 2026-06-17.
+OVERSUB_STRATEGIES = ["modelactor", "modelactor_slipstream"]
 
 # Streaming (warm Model-Actor) strategies: 4 paced feeds, actors stay alive.
 STREAM_STRATEGIES = ["stream_modelactor", "stream_modelactor_slipstream"]
@@ -415,7 +421,7 @@ def build_oversub_trials(args) -> List[Trial]:
         # Canonical regime: index 1 = w6000ov03 for the PhaseNet family;
         # EQT models only have w6000.
         wtag, in_samples, overlap, net_suffix = regimes[min(1, len(regimes) - 1)]
-        for strategy in ORCH_STRATEGIES:
+        for strategy in OVERSUB_STRATEGIES:
             slip = strategy in ORCH_SLIPSTREAM_STRATEGIES
             btag = "_bs256" if slip else ""
             for dtype, ptag in _oversub_precisions(strategy, model):

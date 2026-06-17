@@ -35,15 +35,15 @@ TARGETS = {
     ("matrix", "ripper"): 384, ("matrix", "modelactor"): 384,
     ("matrix", "modelactor_slipstream"): 1536,   # bf16 only (fp32/fp16/compile dropped 2026-06-16)
     ("latency", "stream_modelactor"): 128, ("latency", "stream_modelactor_slipstream"): 256,  # fp32+bf16 only
-    ("oversub", "ripper"): 192, ("oversub", "modelactor"): 192,
-    ("oversub", "modelactor_slipstream"): 192,
+    ("oversub", "modelactor"): 192,
+    ("oversub", "modelactor_slipstream"): 192,   # ripper dropped from oversub 2026-06-17
 }
 PHASE_LABEL = {"matrix": "Main matrix", "latency": "Latency sweep", "oversub": "Oversub sweep"}
 ORDER = (
     [("matrix", m) for m in ("annotate", "classify", "slipstream", "ripper", "modelactor",
                              "modelactor_slipstream")]
     + [("latency", m) for m in ("stream_modelactor", "stream_modelactor_slipstream")]
-    + [("oversub", m) for m in ("ripper", "modelactor", "modelactor_slipstream")]
+    + [("oversub", m) for m in ("modelactor", "modelactor_slipstream")]
 )
 
 
