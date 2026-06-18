@@ -74,7 +74,8 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
     load_manifest_catalog,
 )
 
-STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream", "stream_annotate")
+STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream", "stream_annotate",
+              "stream_modelactor_2gpu")
 MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -204,6 +205,11 @@ def run_one_repeat(args) -> int:
     # Feed 0 is cold (includes lazy CUDA init); feeds 1..N-1 are warm steady state
     # -- the fair "warm annotate per window" number to set against warm Model-Actor.
     ann_mode = args.strategy == "stream_annotate"
+    # Spread the actor pool across BOTH physical GPUs (vs the default single-device
+    # pool). Tests whether the GPU "loss" for Model-Actor is fundamental or just a
+    # single-device contention artifact: with 2 GPUs visible and num_gpus=2.0/N per
+    # actor, Ray packs ~N/2 actors onto each device, halving on-device contention.
+    two_gpu = args.strategy == "stream_modelactor_2gpu"
 
     try:
         with st.stage("framework_init"):
@@ -216,7 +222,7 @@ def run_one_repeat(args) -> int:
 
                 ray.init(
                     num_cpus=n_cpus,
-                    num_gpus=(1 if gpu else 0),
+                    num_gpus=((2 if two_gpu else 1) if gpu else 0),
                     include_dashboard=False,
                     ignore_reinit_error=True,
                     logging_level="ERROR",
@@ -258,9 +264,13 @@ def run_one_repeat(args) -> int:
                 )
             if not ann_mode:
                 actors = []
+                # With 2 GPUs visible, requesting 2.0/N gpu per actor makes the
+                # pool's total demand 2.0, which Ray packs as ~N/2 actors per device
+                # (each actor still sees its assigned GPU as cuda:0).
+                gpu_frac = (2.0 if two_gpu else 1.0) / n_actors
                 for _ in range(n_actors):
                     if gpu:
-                        actors.append(ActorCls.options(num_gpus=1.0 / n_actors, num_cpus=0).remote(**remote_kwargs))
+                        actors.append(ActorCls.options(num_gpus=gpu_frac, num_cpus=0).remote(**remote_kwargs))
                     else:
                         actors.append(ActorCls.options(num_cpus=1).remote(**remote_kwargs))
                 ray.get([a.ready.remote() for a in actors])
@@ -459,7 +469,10 @@ def _physical_gpu_id(args) -> int:
 
 def _worker_env(args, gpu: bool) -> Dict[str, str]:
     env = dict(os.environ)
-    if gpu:
+    if gpu and args.strategy == "stream_modelactor_2gpu":
+        # Expose BOTH physical GPUs so Ray can spread the actor pool across them.
+        env["CUDA_VISIBLE_DEVICES"] = "0,1"
+    elif gpu:
         env["CUDA_VISIBLE_DEVICES"] = str(_physical_gpu_id(args))
     else:
         env["CUDA_VISIBLE_DEVICES"] = ""
