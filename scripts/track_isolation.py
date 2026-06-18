@@ -51,10 +51,22 @@ def main():
     done = sum(r[1] for r in rows)
     target = sum(r[2] for r in rows)
 
+    # ---- LIVE ISOLATION CHECK: how many trial DRIVERS are executing right now ----
+    drivers = subprocess.run(["bash", "-c",
+        "ps -eo args | grep -E 'run_fair_(stream_trial|trial|orch_trial)\\.py' "
+        "| grep -v grep | grep -v -- '--repeat-index' | wc -l"],
+        capture_output=True, text=True).stdout.strip()
+    nd = int(drivers or 0)
+    iso = "OK  (exactly 1 trial — isolated)" if nd == 1 else (
+        "IDLE (between trials/finished)" if nd == 0 else
+        f"** WARNING: {nd} TRIALS RUNNING AT ONCE — ISOLATION BROKEN **")
+
     bar = lambda d, t: ("#" * int(20 * d / t)).ljust(20) if t else " " * 20
     print("=" * 74)
-    print("  ISOLATED RE-MEASUREMENT  (clean, one-trial-at-a-time)")
+    print("  ISOLATED RE-MEASUREMENT  (strictly one trial at a time)")
+    print(f"  ISOLATION: {iso}   [concurrent trial drivers = {nd}]")
     print("=" * 74)
+    print("  (bars below = cumulative COMPLETED cells per category, NOT concurrent runs)")
     for label, d, t in rows:
         print(f"  [{bar(d,t)}] {d:4d}/{t:<4d}  {label}")
     if over_skip:
