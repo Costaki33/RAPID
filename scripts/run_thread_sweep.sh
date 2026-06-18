@@ -18,7 +18,14 @@ ROOT=results/fair_benchmark_threadsweep
 LOG=$ROOT/threadsweep.log
 mkdir -p "$ROOT"
 MODELS=(PhaseNet PhaseNetLight EQTransformer EQT-NC)
-THREADS=(1 2 4 8 16 20)
+# The main matrix already swept cpu counts {5,8,11,14,17,20} with threads==cores
+# (a single-process method uses only its thread count regardless of idle cores,
+# so those ARE thread-sensitivity points at threads {5..20}). We reuse them via
+# the analyzer and only RUN the never-tested low end here. annotate/slipstream
+# are cheap, so we take a clean full low+mid sweep; classify is catastrophic at
+# high threads (already on record), so we run only the cheap low end and reuse
+# the matrix diagonal for {5,8,11,14,17,20}.
+declare -A GRID=( [annotate]="1 2 4 8 16" [slipstream]="1 2 4 8 16" [classify]="1 2 4" )
 
 cell() {  # method  model  threads
   echo "=== $(date +%H:%M:%S)  $1 / $2 / thr$3 ===" | tee -a "$LOG"
@@ -29,11 +36,9 @@ cell() {  # method  model  threads
     --results-root "$ROOT" --resume >> "$LOG" 2>&1
 }
 
-# Cheap methods first (batched: ~seconds), then classify (catastrophic at high
-# threads for heavy models), low threads first so the curve fills in early.
 for METH in annotate slipstream classify; do
   for M in "${MODELS[@]}"; do
-    for T in "${THREADS[@]}"; do
+    for T in ${GRID[$METH]}; do
       cell "$METH" "$M" "$T"
     done
   done

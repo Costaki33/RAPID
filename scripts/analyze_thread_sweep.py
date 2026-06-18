@@ -14,25 +14,48 @@ import glob, json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RES = ROOT / "results" / "fair_benchmark_threadsweep"
+RES = ROOT / "results" / "fair_benchmark_threadsweep"   # clean isolated low/mid sweep
+MATRIX = ROOT / "results" / "fair_benchmark"            # reused diagonal (threads==cores)
 OUT = ROOT / "docs" / "figures_v3"
 MODELS = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC"]
 METHODS = ["classify", "annotate", "slipstream"]
 
 
 def load():
-    """(method, model) -> {threads: total_s}."""
+    """(method, model) -> {threads: (total_s, source)}.
+
+    Merges the clean isolated sweep (RES) with the reused main-matrix diagonal
+    (MATRIX, threads==cores, recorded via backfilled threads_per_worker). The
+    sweep wins on overlap (measured in isolation; matrix points were collected
+    with concurrent neighbours, hence noisier -- flagged as 'reused')."""
     D = {}
+    # matrix diagonal first (lower priority)
+    for p in glob.glob(str(MATRIX / "**" / "result.json"), recursive=True):
+        if "/oversub/" in p or "/streaming/" in p:
+            continue
+        try:
+            r = json.loads(Path(p).read_text()); m = r["meta"]
+        except Exception:
+            continue
+        if (m.get("family") != "native" or m.get("device") != "cpu"
+                or m.get("dataset") != "stead" or m.get("n_stations") != 580):
+            continue
+        if m.get("method") == "slipstream" and m.get("dtype") != "fp32":
+            continue
+        t = (r.get("timing") or {}).get("total_s_mean"); thr = m.get("torch_threads")
+        if t is None or thr is None:
+            continue
+        D.setdefault((m["method"], m["model"]), {})[int(thr)] = (t, "reused")
+    # clean sweep wins on overlap
     for p in glob.glob(str(RES / "**" / "result.json"), recursive=True):
         try:
             r = json.loads(Path(p).read_text()); m = r["meta"]
         except Exception:
             continue
-        t = (r.get("timing") or {}).get("total_s_mean")
-        thr = m.get("torch_threads")
+        t = (r.get("timing") or {}).get("total_s_mean"); thr = m.get("torch_threads")
         if t is None or thr is None:
             continue
-        D.setdefault((m["method"], m["model"]), {})[int(thr)] = t
+        D.setdefault((m["method"], m["model"]), {})[int(thr)] = (t, "clean")
     return D
 
 
@@ -46,15 +69,20 @@ def main():
         if not any(rows.values()):
             continue
         threads = sorted({t for r in rows.values() for t in r})
-        print(f"\n=== {meth}: total CPU time (s), STEAD 580 st, 20 cores, by torch intra-op threads ===")
-        hdr = "thr  " + "  ".join(f"{m:>13s}" for m in MODELS)
-        print(hdr)
+        print(f"\n=== {meth}: total CPU time (s), STEAD 580 st, by torch intra-op threads "
+              f"(* = reused matrix diagonal, threads==cores; rest = clean isolated) ===")
+        print("thr  " + "  ".join(f"{m:>13s}" for m in MODELS))
         for t in threads:
-            cells = "  ".join((f"{rows[m][t]:13.1f}" if t in rows[m] else f"{'–':>13s}") for m in MODELS)
-            print(f"{t:<4d} {cells}")
-        # per-model optimum
+            cells = []
+            for m in MODELS:
+                if t in rows[m]:
+                    val, src = rows[m][t]
+                    cells.append(f"{val:11.1f}{'*' if src == 'reused' else ' '} ")
+                else:
+                    cells.append(f"{'–':>13s}")
+            print(f"{t:<4d} {'  '.join(cells)}")
         opt = "opt  " + "  ".join(
-            (f"{min(rows[m], key=rows[m].get):>4d}t={min(rows[m].values()):6.1f}s"
+            (f"{min(rows[m], key=lambda k: rows[m][k][0]):>4d}t={min(v[0] for v in rows[m].values()):6.1f}s"
              if rows[m] else f"{'–':>13s}") for m in MODELS)
         print(opt)
 
@@ -75,7 +103,7 @@ def main():
             if not r:
                 continue
             xs = sorted(r)
-            ax.plot(xs, [r[x] for x in xs], "o-", label=model, color=colors[model])
+            ax.plot(xs, [r[x][0] for x in xs], "o-", label=model, color=colors[model])
         ax.axhline(30, color="k", ls=":", lw=1)
         ax.text(1, 32, "30 s budget", fontsize=7)
         ax.set_xscale("log", base=2); ax.set_yscale("log")
