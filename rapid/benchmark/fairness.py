@@ -360,7 +360,7 @@ SCHEMA_VERSION = 3
 # ---------------------------------------------------------------------------
 
 
-def pin_threads(n_cpus: int) -> None:
+def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
     """Cap every compute library to ``n_cpus`` threads to match the affinity mask.
 
     Sets the standard OpenMP/BLAS env vars AND, crucially, ``torch`` intra-op and
@@ -368,8 +368,18 @@ def pin_threads(n_cpus: int) -> None:
     TensorFlow intra/inter are set best-effort only if TF is already importable so
     we never force a heavy import for pure-PyTorch native runs. Safe to call once
     per process (e.g. at the start of each scheduler subprocess).
+
+    ``torch_threads`` decouples the compute-thread count from the core budget:
+    when given, every thread control is set to it instead of ``n_cpus`` (the
+    affinity mask still restricts which cores are usable). This drives the
+    thread-sensitivity sweep -- for the small per-call tensors these seismic
+    models emit on CPU, intra-op threading does not convert cores into throughput
+    and is catastrophic for per-station classify(), so the optimal single-process
+    config is well below the core count.
     """
     n = max(1, int(n_cpus))
+    if torch_threads is not None:
+        n = max(1, int(torch_threads))
     for key in (
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",

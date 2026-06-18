@@ -144,6 +144,7 @@ def _run_batched_repeat(
     child: str,
     device: str,
     n_cpus: int,
+    torch_threads: Optional[int] = None,
     in_samples: int,
     overlap_samples: int,
     dtype: str,
@@ -162,7 +163,7 @@ def _run_batched_repeat(
     with st.stage("framework_init"):
         import torch  # noqa: F401
 
-        pin_threads(n_cpus)
+        pin_threads(n_cpus, torch_threads=torch_threads)
         if gpu:
             try:
                 torch.cuda.reset_peak_memory_stats()
@@ -269,6 +270,7 @@ def _run_annotate_repeat(
     child: str,
     device: str,
     n_cpus: int,
+    torch_threads: Optional[int] = None,
     in_samples: int,
     overlap_samples: int,
     trace_len: int,
@@ -287,7 +289,7 @@ def _run_annotate_repeat(
     with st.stage("framework_init"):
         import torch
 
-        pin_threads(n_cpus)
+        pin_threads(n_cpus, torch_threads=torch_threads)
 
     with st.stage("model_load"):
         import seisbench.models as sbm
@@ -365,6 +367,7 @@ def _run_classify_seq_repeat(
     child: str,
     device: str,
     n_cpus: int,
+    torch_threads: Optional[int] = None,
     in_samples: int,
     overlap_samples: int,
     trace_len: int,
@@ -387,7 +390,7 @@ def _run_classify_seq_repeat(
     with st.stage("framework_init"):
         import torch
 
-        pin_threads(n_cpus)
+        pin_threads(n_cpus, torch_threads=torch_threads)
 
     with st.stage("model_load"):
         import seisbench.models as sbm
@@ -522,7 +525,7 @@ def run_one_repeat(args) -> int:
         if args.method == "classify":
             repeat, picks = _run_classify_seq_repeat(
                 net_dir=net_dir, stations=stations, parent=parent, child=child,
-                device=device, n_cpus=n_eff, in_samples=args.in_samples,
+                device=device, n_cpus=n_eff, torch_threads=args.torch_threads, in_samples=args.in_samples,
                 overlap_samples=args.overlap_samples, trace_len=trace_len,
                 p_threshold=args.p_threshold, s_threshold=args.s_threshold,
                 min_separation=args.min_separation, gpu=gpu, picks_path=picks_path,
@@ -530,7 +533,7 @@ def run_one_repeat(args) -> int:
         elif args.method == "annotate":
             repeat, picks = _run_annotate_repeat(
                 net_dir=net_dir, stations=stations, parent=parent, child=child,
-                device=device, n_cpus=n_eff, in_samples=args.in_samples,
+                device=device, n_cpus=n_eff, torch_threads=args.torch_threads, in_samples=args.in_samples,
                 overlap_samples=args.overlap_samples, trace_len=trace_len,
                 batch_size=args.batch_size, p_threshold=args.p_threshold,
                 s_threshold=args.s_threshold, min_separation=args.min_separation, gpu=gpu,
@@ -539,7 +542,7 @@ def run_one_repeat(args) -> int:
         else:
             repeat, picks = _run_batched_repeat(
                 net_dir=net_dir, stations=stations, parent=parent, child=child,
-                device=device, n_cpus=n_eff, in_samples=args.in_samples,
+                device=device, n_cpus=n_eff, torch_threads=args.torch_threads, in_samples=args.in_samples,
                 overlap_samples=args.overlap_samples, dtype=args.dtype,
                 compile_model=args.compile, batch_size=args.batch_size,
                 p_threshold=args.p_threshold, s_threshold=args.s_threshold,
@@ -693,6 +696,7 @@ def run_driver(args) -> int:
         method=args.method, family="native", dataset=args.dataset.lower(),
         n_stations=args.n_stations, model=args.model, parent=MODELS[args.model]["parent"],
         child=MODELS[args.model]["child"], device=args.device, n_cpus=args.n_cpus,
+        torch_threads=(args.torch_threads if args.torch_threads is not None else args.n_cpus),
         gpu_id=(args.gpu_id if gpu else None), in_samples=args.in_samples,
         overlap_samples=args.overlap_samples, net_window=(args.net_suffix or "_w6000").lstrip("_"),
         window_samples=args.in_samples, dtype=args.dtype, compile=args.compile,
@@ -760,6 +764,9 @@ def main() -> int:
     ap.add_argument("--model", required=True, choices=list(MODELS.keys()))
     ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"])
     ap.add_argument("--n-cpus", type=int, default=20)
+    ap.add_argument("--torch-threads", type=int, default=None,
+                    help="Override torch intra/inter-op thread count (decoupled from the core "
+                         "budget) for the thread-sensitivity sweep. Default None = use n_cpus.")
     ap.add_argument("--gpu-id", type=int, default=0)
     ap.add_argument("--in-samples", type=int, default=6000)
     ap.add_argument("--overlap-samples", type=int, default=0)
