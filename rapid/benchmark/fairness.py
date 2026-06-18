@@ -44,22 +44,34 @@ class GpuVramSampler:
     -- all are in the tree, so all are counted. Exposes:
 
     * ``baseline_mb``  -- tree VRAM at start (before model load, ~0)
-    * ``peak_mb``      -- peak tree VRAM during the run
+    * ``peak_mb``      -- peak tree VRAM during the run (summed over tracked GPUs)
     * ``end_mb``       -- tree VRAM at stop (process_tree_vram_mb)
+
+    When ``gpu_indices`` names more than one device (e.g. a Model-Actor pool
+    spread across both GPUs), the aggregate ``*_mb`` fields sum over the devices
+    and the per-device breakdown is exposed via ``per_gpu_peak_mb`` /
+    ``per_gpu_end_mb`` / ``per_gpu_baseline_mb`` (keyed by physical NVML index).
+    NVML indices are physical and independent of ``CUDA_VISIBLE_DEVICES``, so
+    GPU0 and GPU1 are attributed correctly regardless of Ray's per-actor mapping.
     """
 
-    def __init__(self, process=None, gpu_index: int = 0, interval_s: float = 0.1):
+    def __init__(self, process=None, gpu_index: int = 0, interval_s: float = 0.1,
+                 gpu_indices: Optional[List[int]] = None):
         import psutil
 
         self.process = process or psutil.Process()
-        self.gpu_index = gpu_index
+        self.gpu_indices = list(gpu_indices) if gpu_indices is not None else [gpu_index]
+        self.gpu_index = self.gpu_indices[0]
         self.interval_s = interval_s
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._handle = None
+        self._handles: Dict[int, object] = {}
         self.baseline_mb = 0.0
         self.peak_mb = 0.0
         self.end_mb = 0.0
+        self.per_gpu_baseline_mb: Dict[int, float] = {}
+        self.per_gpu_peak_mb: Dict[int, float] = {}
+        self.per_gpu_end_mb: Dict[int, float] = {}
 
     def _our_pids(self) -> set:
         import psutil
@@ -75,27 +87,37 @@ class GpuVramSampler:
             pass
         return pids
 
-    def _tree_vram_mb(self) -> float:
+    def _tree_vram_by_gpu(self) -> Dict[int, float]:
+        """Per-device tree VRAM (MB), filtered to our PIDs."""
         import pynvml
 
         our = self._our_pids()
-        try:
-            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(self._handle)
-        except Exception:
-            return 0.0
-        total = 0.0
-        for p in procs:
-            if p.pid in our and getattr(p, "usedGpuMemory", None):
-                total += p.usedGpuMemory / 1e6
-        return total
+        out: Dict[int, float] = {}
+        for idx, handle in self._handles.items():
+            try:
+                procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            except Exception:
+                out[idx] = 0.0
+                continue
+            total = 0.0
+            for p in procs:
+                if p.pid in our and getattr(p, "usedGpuMemory", None):
+                    total += p.usedGpuMemory / 1e6
+            out[idx] = total
+        return out
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                v = self._tree_vram_mb()
-                self.end_mb = v
-                if v > self.peak_mb:
-                    self.peak_mb = v
+                by_gpu = self._tree_vram_by_gpu()
+                total = sum(by_gpu.values())
+                self.end_mb = total
+                if total > self.peak_mb:
+                    self.peak_mb = total
+                for idx, v in by_gpu.items():
+                    self.per_gpu_end_mb[idx] = v
+                    if v > self.per_gpu_peak_mb.get(idx, 0.0):
+                        self.per_gpu_peak_mb[idx] = v
             except Exception:
                 pass
             self._stop.wait(self.interval_s)
@@ -105,12 +127,17 @@ class GpuVramSampler:
             import pynvml
 
             pynvml.nvmlInit()
-            self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
-            self.baseline_mb = self._tree_vram_mb()
+            for idx in self.gpu_indices:
+                self._handles[idx] = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            by_gpu = self._tree_vram_by_gpu()
+            self.per_gpu_baseline_mb = dict(by_gpu)
+            self.per_gpu_peak_mb = dict(by_gpu)
+            self.per_gpu_end_mb = dict(by_gpu)
+            self.baseline_mb = sum(by_gpu.values())
             self.peak_mb = self.baseline_mb
             self.end_mb = self.baseline_mb
         except Exception:
-            self._handle = None
+            self._handles = {}
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -120,8 +147,11 @@ class GpuVramSampler:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         try:
-            if self._handle is not None:
-                self.end_mb = self._tree_vram_mb()
+            if self._handles:
+                by_gpu = self._tree_vram_by_gpu()
+                self.end_mb = sum(by_gpu.values())
+                for idx, v in by_gpu.items():
+                    self.per_gpu_end_mb[idx] = v
         except Exception:
             pass
         return self.peak_mb
@@ -644,6 +674,13 @@ MEMORY_KEYS = [
     "peak_vram_mb",
     "process_tree_vram_mb",
     "vram_growth_mb",
+    # Per-physical-GPU VRAM (flat scalars so _agg handles them). Present only for
+    # the device(s) a trial used: single-GPU trials emit one, the 2-GPU actor
+    # split emits both gpu0 and gpu1.
+    "peak_vram_mb_gpu0",
+    "peak_vram_mb_gpu1",
+    "process_tree_vram_mb_gpu0",
+    "process_tree_vram_mb_gpu1",
 ]
 
 RESOURCE_KEYS = [

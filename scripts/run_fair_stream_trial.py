@@ -144,6 +144,7 @@ def run_one_repeat(args) -> int:
     baseline = _self_rss_mb()  # clean floor BEFORE ray/torch/eqcctpro imports
 
     gpu = args.device == "gpu"
+    two_gpu = args.strategy == "stream_modelactor_2gpu"
     core_list = [int(c) for c in str(args.core_list).split(",") if c.strip() != ""] if args.core_list else None
     n_eff = _set_affinity(core_list)
     n_cpus = n_eff if core_list else args.n_cpus
@@ -178,8 +179,10 @@ def run_one_repeat(args) -> int:
     if gpu:
         from rapid.benchmark.fairness import GpuVramSampler
 
+        # 2-GPU pool spans both physical devices; otherwise track the one assigned.
+        vram_gpus = [0, 1] if two_gpu else [int(args.gpu_id or 0)]
         vram_sampler = GpuVramSampler(
-            process=sampler.process, gpu_index=int(args.gpu_id or 0), interval_s=0.1
+            process=sampler.process, gpu_indices=vram_gpus, interval_s=0.1
         )
         vram_sampler.start()
     from rapid.benchmark.fairness import ResourceUsageSampler
@@ -205,11 +208,9 @@ def run_one_repeat(args) -> int:
     # Feed 0 is cold (includes lazy CUDA init); feeds 1..N-1 are warm steady state
     # -- the fair "warm annotate per window" number to set against warm Model-Actor.
     ann_mode = args.strategy == "stream_annotate"
-    # Spread the actor pool across BOTH physical GPUs (vs the default single-device
-    # pool). Tests whether the GPU "loss" for Model-Actor is fundamental or just a
-    # single-device contention artifact: with 2 GPUs visible and num_gpus=2.0/N per
-    # actor, Ray packs ~N/2 actors onto each device, halving on-device contention.
-    two_gpu = args.strategy == "stream_modelactor_2gpu"
+    # two_gpu (set above) spreads the actor pool across BOTH physical GPUs (vs the
+    # default single-device pool): with 2 GPUs visible and num_gpus=2.0/N per actor,
+    # Ray packs ~N/2 actors onto each device, halving on-device contention.
 
     try:
         with st.stage("framework_init"):
@@ -410,6 +411,13 @@ def run_one_repeat(args) -> int:
         mem["peak_vram_mb"] = round(vram_sampler.peak_mb, 2)
         mem["process_tree_vram_mb"] = round(vram_sampler.end_mb, 2)
         mem["vram_growth_mb"] = round(max(0.0, vram_sampler.peak_mb - vram_sampler.baseline_mb), 2)
+        # Per-physical-GPU breakdown (GPU0 vs GPU1) as flat scalar keys -- the
+        # honest number for the 2-GPU actor split, where the aggregate above sums
+        # across both devices. Single-GPU trials emit only the one device they used.
+        for idx, v in vram_sampler.per_gpu_peak_mb.items():
+            mem[f"peak_vram_mb_gpu{idx}"] = round(v, 2)
+        for idx, v in vram_sampler.per_gpu_end_mb.items():
+            mem[f"process_tree_vram_mb_gpu{idx}"] = round(v, 2)
 
     if not ok:
         rec = {"repeat_index": args.repeat_index, "success": False, "error": err, "feeds": feeds, **mem, **resources}

@@ -38,6 +38,21 @@ def warm_vals(root, want_method=None):
     return D
 
 
+def per_gpu_vram(root):
+    """(model, n_stations) -> (peak GPU0 MB, peak GPU1 MB, aggregate MB)."""
+    M = {}
+    for p in glob.glob(str(root / "**" / "result.json"), recursive=True):
+        try:
+            r = json.loads(Path(p).read_text()); m = r["meta"]; mem = r.get("memory") or {}
+        except Exception:
+            continue
+        g0 = mem.get("peak_vram_mb_gpu0_mean"); g1 = mem.get("peak_vram_mb_gpu1_mean")
+        agg = mem.get("peak_vram_mb_mean")
+        if g0 is not None or g1 is not None:
+            M[(m["model"], m["n_stations"])] = (g0, g1, agg)
+    return M
+
+
 def ci95(vals):
     if not vals:
         return None
@@ -80,6 +95,20 @@ def main():
                 r, lo, hi = boot(g1, g2)             # 1-GPU / 2-GPU = how much faster 2-GPU is
                 sp = f"{r:.1f}× [{lo:.1f}–{hi:.1f}]"
             print(f"{model:14s} {f(g1):>12s} {f(g2):>12s} {sp:>16s} {f(ann):>13s} {f(cpu):>12s}")
+        print()
+    # per-GPU VRAM for the 2-GPU split (honest both-device accounting)
+    vram = per_gpu_vram(TWO)
+    if vram:
+        print("=== 2-GPU actor split: peak VRAM per physical device (MB, mean over repeats) ===")
+        print(f"{'model':14s} {'st':>4s} {'GPU0':>9s} {'GPU1':>9s} {'aggregate':>11s}")
+        for st in (580, 250):
+            for model in MODELS:
+                v = vram.get((model, st))
+                if not v:
+                    continue
+                g0, g1, agg = v
+                print(f"{model:14s} {st:>4d} {(f'{g0:.0f}' if g0 else '–'):>9s} "
+                      f"{(f'{g1:.0f}' if g1 else '–'):>9s} {(f'{agg:.0f}' if agg else '–'):>11s}")
         print()
     # verdict line
     print("Reads: 2gpu speedup = MA 1-GPU ÷ MA 2-GPU (how much the split buys).")
