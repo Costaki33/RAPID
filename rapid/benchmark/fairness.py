@@ -376,7 +376,16 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
     models emit on CPU, intra-op threading does not convert cores into throughput
     and is catastrophic for per-station classify(), so the optimal single-process
     config is well below the core count.
+
+    ``torch_threads == 0`` is a sentinel meaning "leave every library at its
+    out-of-the-box default" -- we set nothing, so torch uses its native intra-op
+    default (the machine's physical-core count) exactly as a user calling
+    SeisBench ``classify()``/``annotate()`` with no tuning would get. This is the
+    naive baseline anchor for the thread sweep (and is heavily oversubscribed when
+    the affinity mask is smaller than the core count -- which is the point).
     """
+    if torch_threads == 0:
+        return
     n = max(1, int(n_cpus))
     if torch_threads is not None:
         n = max(1, int(torch_threads))
