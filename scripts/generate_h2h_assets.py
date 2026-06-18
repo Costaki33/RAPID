@@ -23,29 +23,6 @@ plt.rcParams.update({"figure.dpi": 150, "font.size": 9, "axes.grid": True, "grid
 def canon(m): return "w6000" if m in ("EQTransformer", "EQT-NC") else "w6000ov03"
 
 
-def load():
-    D = {}
-    for p in glob.glob(str(RES / "**" / "result.json"), recursive=True):
-        try:
-            r = json.loads(Path(p).read_text()); m = r["meta"]
-        except Exception:
-            continue
-        lat = r.get("latency") or {}
-        w = lat.get("warm_feed_mean_s_mean"); c = lat.get("cold_feed_total_s_mean")
-        if w is None:
-            continue
-        if canon(m["model"]) not in m.get("tag", "") and m["model"] not in ("EQTransformer", "EQT-NC"):
-            continue
-        key = (m["model"], m["n_stations"], m["device"], m["method"])
-        D.setdefault(key, []).append((c, w))
-    return D
-
-
-def best(D, model, st, dev, meth):
-    v = D.get((model, st, dev, meth))
-    return min(v, key=lambda x: x[1]) if v else None
-
-
 def load_repeats():
     """Per-repeat warm latencies per config, for confidence intervals."""
     R = {}
@@ -86,32 +63,47 @@ def boot_ratio(a, b, n=10000):
     return statistics.mean(a) / statistics.mean(b), rs[int(0.025 * len(rs))], rs[int(0.975 * len(rs))]
 
 
-def fig(D, st=580):
-    fig, ax = plt.subplots(figsize=(9, 4.3))
-    width = 0.2
-    x = range(len(MODELS))
+def fig(R):
+    """Two-panel (250 | 580) warm-latency comparison with 95% CI error bars."""
     series = [
         ("annotate — CPU", "cpu", "stream_annotate", "#e74c3c"),
         ("Model-Actor — CPU (GPU-free)", "cpu", "stream_modelactor", "#2e86c1"),
         ("annotate — GPU", "gpu", "stream_annotate", "#f1948a"),
         ("Model-Actor — GPU", "gpu", "stream_modelactor", "#aed6f1"),
     ]
-    for i, (label, dev, meth, color) in enumerate(series):
-        ys = []
-        for model in MODELS:
-            b = best(D, model, st, dev, meth)
-            ys.append(b[1] if b else 0)
-        ax.bar([xi + (i - 1.5) * width for xi in x], ys, width, label=label, color=color)
-    ax.set_xticks(list(x)); ax.set_xticklabels(MODELS)
-    ax.set_ylabel("warm per-window latency (s)")
-    ax.set_title(f"Warm per-window latency: Model-Actor vs annotate(), {st} stations\n"
-                 "On CPU, Model-Actor beats annotate for the heavy models; on GPU, annotate wins")
-    ax.legend(fontsize=8)
-    # annotate the CPU speedups
-    for j, model in enumerate(MODELS):
-        ca = best(D, model, st, "cpu", "stream_annotate"); cm = best(D, model, st, "cpu", "stream_modelactor")
-        if ca and cm:
-            ax.text(j - 0.75 * width, max(ca[1], cm[1]) + 0.15, f"{ca[1]/cm[1]:.1f}x", fontsize=8, color="#2e86c1", ha="center")
+    width = 0.2
+    x = list(range(len(MODELS)))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), sharey=False)
+    for ax, st in zip(axes, (250, 580)):
+        ymax = 0.0
+        for i, (label, dev, meth, color) in enumerate(series):
+            ys, errs = [], []
+            for model in MODELS:
+                c = ci95(R.get((model, st, dev, meth)))
+                ys.append(c[0] if c else 0.0)
+                errs.append(c[1] if c else 0.0)
+            ax.bar([xi + (i - 1.5) * width for xi in x], ys, width, label=label, color=color,
+                   yerr=errs, capsize=2, error_kw={"elinewidth": 0.8, "alpha": 0.7})
+            ymax = max(ymax, *[a + b for a, b in zip(ys, errs)])
+        # CPU speedup labels above each CPU pair
+        for j, model in enumerate(MODELS):
+            ca = ci95(R.get((model, st, "cpu", "stream_annotate")))
+            cm = ci95(R.get((model, st, "cpu", "stream_modelactor")))
+            if ca and cm and cm[0] > 0:
+                ax.text(j - 0.75 * width, ca[0] + ca[1] + 0.03 * ymax, f"{ca[0]/cm[0]:.1f}×",
+                        fontsize=8, color="#2e86c1", ha="center", fontweight="bold")
+        ax.axhline(0, color="k", lw=0.5)
+        ax.set_xticks(x); ax.set_xticklabels(MODELS, fontsize=8)
+        ax.set_ylim(0, ymax * 1.18)
+        ax.set_title(f"{st} stations", fontsize=10)
+        if st == 250:
+            ax.set_ylabel("warm per-window latency (s)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=4, fontsize=8, frameon=False,
+               bbox_to_anchor=(0.5, 1.005))
+    fig.suptitle("Warm per-window latency: Model-Actor vs annotate() — CPU Model-Actor matches/beats GPU annotate "
+                 "for every model\n(× = CPU annotate÷Model-Actor speedup; error bars = 95% CI over 10 repeats; "
+                 "on GPU, annotate wins as actors contend for one device)", fontsize=9, y=1.10)
     fig.tight_layout()
     fig.savefig(OUT / "fig_head_to_head.png", bbox_inches="tight")
     plt.close(fig)
@@ -150,7 +142,7 @@ def table(R):
 
 
 if __name__ == "__main__":
-    D = load()
-    fig(D, 580)
-    table(load_repeats())
+    R = load_repeats()
+    fig(R)
+    table(R)
     print(f"\nWrote {OUT/'fig_head_to_head.png'} and {OUT/'table_h2h.md'}")
