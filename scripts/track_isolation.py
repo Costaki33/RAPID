@@ -51,20 +51,34 @@ def main():
     done = sum(r[1] for r in rows)
     target = sum(r[2] for r in rows)
 
-    # ---- LIVE ISOLATION CHECK: how many trial DRIVERS are executing right now ----
-    drivers = subprocess.run(["bash", "-c",
-        "ps -eo args | grep -E 'run_fair_(stream_trial|trial|orch_trial)\\.py' "
-        "| grep -v grep | grep -v -- '--repeat-index' | wc -l"],
-        capture_output=True, text=True).stdout.strip()
-    nd = int(drivers or 0)
-    iso = "OK  (exactly 1 trial — isolated)" if nd == 1 else (
-        "IDLE (between trials/finished)" if nd == 0 else
-        f"** WARNING: {nd} TRIALS RUNNING AT ONCE — ISOLATION BROKEN **")
+    # ---- LIVE ISOLATION CHECK ----
+    # Two independent signals, both robust to the microsecond fork->exec window
+    # where a freshly-spawned repeat-worker momentarily still carries the driver's
+    # argv (before exec swaps in --repeat-index), which can transiently look like
+    # a 2nd "driver". We (a) count active isolation RUNNER scripts (stable; the
+    # real structural guarantee = 1), and (b) double-sample the worker count and
+    # take the SUSTAINED value, so a fork-exec blip can't raise a false alarm.
+    def count(cmd):
+        return int(subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout.strip() or 0)
+    RUNNERS = ("ps -eo args | grep -E 'run_isolation(_oversub)?\\.sh' | grep -v grep "
+               "| grep -v 'kill -0' | grep -c bash")
+    WORKERS = "ps -eo args | grep -- '--repeat-index' | grep -v grep | wc -l"
+    n_runner = count(RUNNERS)
+    w1 = count(WORKERS); time.sleep(0.4); w2 = count(WORKERS)
+    nd = min(w1, w2)                      # sustained computing-worker count
+    if n_runner > 1:
+        iso = f"** WARNING: {n_runner} ISOLATION RUNNERS ACTIVE — STOP ALL BUT ONE **"
+    elif nd > 1:
+        iso = f"** WARNING: {nd} WORKERS COMPUTING AT ONCE — ISOLATION BROKEN **"
+    elif nd == 1:
+        iso = "OK  (exactly 1 trial computing — isolated)"
+    else:
+        iso = "IDLE (between trials / finished)"
 
     bar = lambda d, t: ("#" * int(20 * d / t)).ljust(20) if t else " " * 20
     print("=" * 74)
     print("  ISOLATED RE-MEASUREMENT  (strictly one trial at a time)")
-    print(f"  ISOLATION: {iso}   [concurrent trial drivers = {nd}]")
+    print(f"  ISOLATION: {iso}   [runners={n_runner}, computing workers={nd}]")
     print("=" * 74)
     print("  (bars below = cumulative COMPLETED cells per category, NOT concurrent runs)")
     for label, d, t in rows:
