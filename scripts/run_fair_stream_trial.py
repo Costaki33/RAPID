@@ -74,7 +74,7 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
     load_manifest_catalog,
 )
 
-STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream")
+STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream", "stream_annotate")
 MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -199,23 +199,42 @@ def run_one_repeat(args) -> int:
     feeds: List[Dict[str, Any]] = []
     last_picks: Dict[str, Dict[str, List[float]]] = {}
 
+    # Warm-annotate baseline: keep ONE SeisBench model loaded in-process and call
+    # model.annotate() on the whole merged network per feed (no Ray, no actors).
+    # Feed 0 is cold (includes lazy CUDA init); feeds 1..N-1 are warm steady state
+    # -- the fair "warm annotate per window" number to set against warm Model-Actor.
+    ann_mode = args.strategy == "stream_annotate"
+
     try:
         with st.stage("framework_init"):
-            import ray
-            from eqcctpro.tools import resolve_ray_temp_dir
+            import torch  # noqa: F401
+            if ann_mode:
+                pass
+            else:
+                import ray
+                from eqcctpro.tools import resolve_ray_temp_dir
 
-            ray.init(
-                num_cpus=n_cpus,
-                num_gpus=(1 if gpu else 0),
-                include_dashboard=False,
-                ignore_reinit_error=True,
-                logging_level="ERROR",
-                _temp_dir=resolve_ray_temp_dir(args.tmp_dir),
-            )
+                ray.init(
+                    num_cpus=n_cpus,
+                    num_gpus=(1 if gpu else 0),
+                    include_dashboard=False,
+                    ignore_reinit_error=True,
+                    logging_level="ERROR",
+                    _temp_dir=resolve_ray_temp_dir(args.tmp_dir),
+                )
 
+        amodel = None
         with st.stage("model_load"):
             slip = args.strategy == "stream_modelactor_slipstream"
-            if slip:
+            if ann_mode:
+                import seisbench.models as sbm
+                import torch
+                amodel = getattr(sbm, m["parent"]).from_pretrained(m["child"])
+                amodel.eval()
+                if gpu and torch.cuda.is_available():
+                    amodel.to(torch.device("cuda:0"))
+                actors = []
+            elif slip:
                 from eqcctpro.slipstream_actor import SlipstreamSeisBenchModelActor as ActorCls
 
                 remote_kwargs = dict(
@@ -237,13 +256,14 @@ def run_one_repeat(args) -> int:
                     gpus_to_use=([0] if gpu else False),
                     use_gpu=gpu,
                 )
-            actors = []
-            for _ in range(n_actors):
-                if gpu:
-                    actors.append(ActorCls.options(num_gpus=1.0 / n_actors, num_cpus=0).remote(**remote_kwargs))
-                else:
-                    actors.append(ActorCls.options(num_cpus=1).remote(**remote_kwargs))
-            ray.get([a.ready.remote() for a in actors])
+            if not ann_mode:
+                actors = []
+                for _ in range(n_actors):
+                    if gpu:
+                        actors.append(ActorCls.options(num_gpus=1.0 / n_actors, num_cpus=0).remote(**remote_kwargs))
+                    else:
+                        actors.append(ActorCls.options(num_cpus=1).remote(**remote_kwargs))
+                ray.get([a.ready.remote() for a in actors])
 
         from rapid.data import load_all_streams, select_stations
 
@@ -280,22 +300,41 @@ def run_one_repeat(args) -> int:
             streams = load_all_streams(net_dir, stations)
             wf_s = time.perf_counter() - t
 
-            t = time.perf_counter()
-            refs = []
-            metas = []
-            for idx, (sta, stq) in enumerate(streams):
-                actor = actors[idx % n_actors]
-                refs.append(actor.classify.remote(stq, **cls_kw))
-                start0 = min(tr.stats.starttime for tr in stq) if len(stq) else None
-                metas.append((sta, start0))
-            outs = ray.get(refs)
-            inf_s = time.perf_counter() - t
+            if ann_mode:
+                # Warm batched annotate over the WHOLE merged network (the path a
+                # batch-annotate deployment would call per window, kept warm).
+                from obspy import Stream
+                import torch
+                merged = Stream()
+                for sta, stq in streams:
+                    merged += stq
+                ann_kw = dict(batch_size=int(args.slipstream_batch_size),
+                              overlap=int(args.overlap_samples), strict=False,
+                              flexible_horizontal_components=True)
+                t = time.perf_counter()
+                _ = amodel.annotate(merged, **ann_kw)
+                if gpu:
+                    torch.cuda.synchronize()
+                inf_s = time.perf_counter() - t
+                pick_s = 0.0          # picks scored by the native annotate family; timing is the deliverable here
+                feed_picks = {}
+            else:
+                t = time.perf_counter()
+                refs = []
+                metas = []
+                for idx, (sta, stq) in enumerate(streams):
+                    actor = actors[idx % n_actors]
+                    refs.append(actor.classify.remote(stq, **cls_kw))
+                    start0 = min(tr.stats.starttime for tr in stq) if len(stq) else None
+                    metas.append((sta, start0))
+                outs = ray.get(refs)
+                inf_s = time.perf_counter() - t
 
-            t = time.perf_counter()
-            feed_picks: Dict[str, Dict[str, List[float]]] = {}
-            for (sta, start0), out in zip(metas, outs):
-                feed_picks[sta] = _picks_from_classify_output(out, start0)
-            pick_s = time.perf_counter() - t
+                t = time.perf_counter()
+                feed_picks = {}
+                for (sta, start0), out in zip(metas, outs):
+                    feed_picks[sta] = _picks_from_classify_output(out, start0)
+                pick_s = time.perf_counter() - t
 
             st.add("waveform_access", wf_s)
             st.add("inference", inf_s)
