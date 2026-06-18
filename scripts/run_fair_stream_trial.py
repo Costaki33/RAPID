@@ -265,10 +265,12 @@ def run_one_repeat(args) -> int:
                 )
             if not ann_mode:
                 actors = []
-                # With 2 GPUs visible, requesting 2.0/N gpu per actor makes the
-                # pool's total demand 2.0, which Ray packs as ~N/2 actors per device
-                # (each actor still sees its assigned GPU as cuda:0).
-                gpu_frac = (2.0 if two_gpu else 1.0) / n_actors
+                # GPU fraction per actor. 1-GPU: 1.0/N packs all N onto the one
+                # device. 2-GPU: size the fraction so ceil(N/2) actors fit on EACH
+                # device -- i.e. 1.0/ceil(N/2). Using the naive 2.0/N breaks for odd
+                # N (e.g. N=5 -> 0.4 -> only floor(1/0.4)=2 fit per GPU = 4 < 5, so
+                # the 5th actor is unschedulable and ray.get(ready) hangs forever).
+                gpu_frac = (1.0 / ((n_actors + 1) // 2)) if two_gpu else (1.0 / n_actors)
                 for _ in range(n_actors):
                     if gpu:
                         actors.append(ActorCls.options(num_gpus=gpu_frac, num_cpus=0).remote(**remote_kwargs))
