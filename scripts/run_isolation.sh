@@ -30,7 +30,7 @@ stream() {  # strategy device model stations  (warm head-to-head / 2-GPU)
     --device "$dev" --n-cpus 20 --gpu-id 0 --core-list "$CORES" --concurrency 20 \
     --in-samples "$ins" --overlap-samples 0 --dtype fp32 \
     --repeats 10 --n-feeds 8 --feed-interval-s 0 \
-    --tag "iso_${st}" --results-root "$ROOT/h2h" --resume >> "$LOG" 2>&1
+    --tag "iso_${dev}_${st}" --results-root "$ROOT/h2h" --resume >> "$LOG" 2>&1
 }
 
 native() {  # method model stations  (single-process baseline at optimal threads=1)
@@ -50,7 +50,7 @@ orch() {  # strategy device model stations  (cold-start orchestration)
     --strategy "$strat" --dataset stead --n-stations "$st" --model "$model" \
     --device "$dev" --n-cpus 20 --gpu-id 0 --core-list "$CORES" \
     --in-samples "$ins" --overlap-samples 0 --dtype fp32 \
-    --repeats 2 --tag "iso_${st}" --results-root "$ROOT/orch" --resume >> "$LOG" 2>&1
+    --repeats 2 --tag "iso_${dev}_${st}" --results-root "$ROOT/orch" --resume >> "$LOG" 2>&1
 }
 
 note "ISOLATION RUN START"
