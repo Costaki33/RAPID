@@ -218,6 +218,57 @@ def fig_head_to_head(D):
     fig.tight_layout(); fig.savefig(OUT / "fig_head_to_head.png", bbox_inches="tight"); plt.close(fig)
 
 
+def fig_orchestration():
+    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    O = {}
+    for p in glob.glob(str(ISO / "orch" / "**" / "result.json"), recursive=True):
+        r = jload(p)
+        if not r:
+            continue
+        m = r["meta"]
+        O.setdefault((m["method"], m["device"]), {})[m["model"]] = (r.get("timing") or {}).get("total_s_mean")
+    series = [("Model-Actor — CPU", ("modelactor", "cpu"), "#2e86c1"),
+              ("Model-Actor — GPU", ("modelactor", "gpu"), "#aed6f1"),
+              ("Ripper — CPU", ("ripper", "cpu"), "#e74c3c"),
+              ("Ripper — GPU", ("ripper", "gpu"), "#f1948a")]
+    width = 0.2; x = range(len(MODELS))
+    fig, ax = plt.subplots(figsize=(10, 4.6))
+    for i, (lab, key, c) in enumerate(series):
+        ys = [O.get(key, {}).get(m, 0) for m in MODELS]
+        ax.bar([xi + (i - 1.5) * width for xi in x], ys, width, label=lab, color=c)
+    ax.axhline(30, color="k", ls=":", lw=1); ax.text(-0.4, 33, "30 s budget", fontsize=8)
+    ax.set_xticks(list(x)); ax.set_xticklabels(MODELS); ax.set_ylabel("cold-start total (s)")
+    ax.set_title("Cold-start orchestration (isolated): persistent Model-Actor ~8× faster than ephemeral Ripper")
+    ax.legend(fontsize=8); ax.set_axisbelow(True); ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout(); fig.savefig(OUT / "fig_orchestration_cpu.png", bbox_inches="tight"); plt.close(fig)
+
+
+def fig_oversub():
+    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    R = {}
+    for p in glob.glob(str(ISO / "oversub" / "**" / "result.json"), recursive=True):
+        r = jload(p)
+        if not r or r.get("skipped"):
+            continue
+        m = r["meta"]
+        if m.get("device") != "cpu" or m.get("method") != "modelactor" or m.get("n_stations") != 580 or m.get("n_cpus") != 20:
+            continue
+        R.setdefault(m["model"], {})[round(m["concurrency"] / 20, 2)] = (r.get("timing") or {}).get("total_s_mean")
+    colors = {"PhaseNet": "#2e86c1", "PhaseNetLight": "#27ae60", "EQTransformer": "#e67e22", "EQT-NC": "#c0392b"}
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    for mo in MODELS:
+        d = R.get(mo, {})
+        if not d:
+            continue
+        xs = sorted(d)
+        ax.plot(xs, [d[x] for x in xs], "o-", label=mo, color=colors[mo])
+    ax.axvline(1.0, color="k", ls=":", lw=1); ax.text(1.02, ax.get_ylim()[1] * 0.9, "1 actor/core", fontsize=8)
+    ax.set_xlabel("actors per core (× core budget)"); ax.set_ylabel("cold-start total (s)")
+    ax.set_title("Oversubscription (isolated, 20 cores, 580 st): optimum ≈ 0.5–1 actor/core; beyond 1× degrades")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(OUT / "fig_oversub.png", bbox_inches="tight"); plt.close(fig)
+
+
 def fig_thread_sweep():
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
     N = {}
@@ -259,8 +310,8 @@ if __name__ == "__main__":
     table_oversub()
     (OUT / "tables_iso.md").write_text("\n".join(L))
     try:
-        fig_head_to_head(D); fig_thread_sweep()
-        print("wrote fig_head_to_head.png, fig_thread_sweep.png")
+        fig_head_to_head(D); fig_thread_sweep(); fig_orchestration(); fig_oversub()
+        print("wrote fig_head_to_head, fig_thread_sweep, fig_orchestration_cpu, fig_oversub")
     except Exception as e:
         print(f"(figures skipped: {e})")
     print(f"Wrote {OUT/'tables_iso.md'}")
