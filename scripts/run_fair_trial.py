@@ -753,6 +753,22 @@ def _worker_env(args, gpu: bool) -> Dict[str, str]:
         env["CUDA_VISIBLE_DEVICES"] = str(_physical_gpu_id(args))
     else:
         env["CUDA_VISIBLE_DEVICES"] = ""
+    # CRITICAL: set the compute-thread env in the PARENT, before the worker imports
+    # torch. torch fixes its intra-op pool size from OMP_NUM_THREADS at import; a
+    # later torch.set_num_threads() in pin_threads does NOT shrink an already-built
+    # pool, so without this the thread sweep silently ran everything at the default
+    # (~physical-core count). torch_threads==0 => leave unset (true SeisBench/torch
+    # out-of-the-box default); None => the core budget; else the swept value.
+    tt = getattr(args, "torch_threads", None)
+    THREAD_KEYS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                   "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+    if tt == 0:
+        for k in THREAD_KEYS:
+            env.pop(k, None)
+    else:
+        val = str(tt if tt is not None else args.n_cpus)
+        for k in THREAD_KEYS:
+            env[k] = val
     return env
 
 
