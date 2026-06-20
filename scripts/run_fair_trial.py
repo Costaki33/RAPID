@@ -735,6 +735,8 @@ def _worker_argv(args, repeat_index: int) -> List[str]:
         "--net-root", str(args.net_root), "--results-root", str(args.results_root),
         "--core-list", args.core_list, "--repeat-index", str(repeat_index),
     ]
+    if args.torch_threads is not None:
+        argv += ["--torch-threads", str(args.torch_threads)]   # <-- was dropped: worker ran at n_cpus threads
     if args.compile:
         argv.append("--compile")
     return argv
