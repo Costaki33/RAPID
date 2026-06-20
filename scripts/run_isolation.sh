@@ -94,12 +94,16 @@ done
 # batched methods, 1 rep for catastrophic classify.
 for ST in 580 250; do
   for M in "${MODELS[@]}"; do
-    for METH in annotate slipstream classify; do
+    # annotate/slipstream are cheap at any thread count -> full {1,2,4} curve.
+    for METH in annotate slipstream; do
       for T in 1 2 4; do native "$METH" "$M" "$ST" "$T" 3; done
     done
+    # classify is catastrophic when oversubscribed -> just its optimum (thr1, the
+    # reportable T1) at 3 reps; the naive-default anchor below shows the blow-up.
+    native classify "$M" "$ST" 1 3
   done
 done
-for M in "${MODELS[@]}"; do                       # naive torch-default anchor, 580 only
+for M in "${MODELS[@]}"; do                       # naive torch-default anchor (~64 threads), 580 only
   for METH in annotate slipstream; do native "$METH" "$M" 580 0 3; done
   native classify "$M" 580 0 1
 done
