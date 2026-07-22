@@ -1,4 +1,5 @@
 # RAPID
+### Resource-Aware Parallel Inference Dispatcher for Real-Time, Network-Scale Deep-Learning Seismic Phase Picking
 
 RAPID (Resource-Aware Parallel Inference Dispatcher) is a toolkit for evaluating and deploying deep-learning seismic phase pickers under real-time, network-scale workloads. It extends SeisBench with orchestration strategies designed for persistent parallel execution, reduced-precision inference through Slipstream, and a benchmarking framework for comparing deployment strategies across different hardware configurations. Rather than focusing solely on model inference speed, RAPID is intended to evaluate how different deployment strategies affect end-to-end processing performance for continuous seismic monitoring.
 
