@@ -73,10 +73,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
 # Only light imports at module load (numpy via fairness/pick_quality). torch and
 # seisbench are imported lazily INSIDE the worker so the memory baseline is clean.
@@ -323,7 +321,7 @@ def _run_annotate_repeat(
     # SeisBench's annotate_stream_pre/annotate_batch_pre hooks, so the
     # preprocess stage below is the MEASURED busy time of those hooks and the
     # inference stage is the annotate wall minus that measured preprocess.
-    from eqcctpro.timing_util import SeisBenchStageProbes
+    from rapid.orchestration.support.timing_util import SeisBenchStageProbes
 
     probes = SeisBenchStageProbes(model)
     ann_kw = dict(
@@ -414,7 +412,7 @@ def _run_classify_seq_repeat(
     # Stage probes: classify() is monolithic; the wrapped SeisBench hooks give
     # MEASURED per-call preprocess + pick-aggregation segments, so the stage
     # columns are measured (inference = classify wall minus those segments).
-    from eqcctpro.timing_util import SeisBenchStageProbes
+    from rapid.orchestration.support.timing_util import SeisBenchStageProbes
 
     probes = SeisBenchStageProbes(model)
     cls_kw = dict(
@@ -541,7 +539,7 @@ def _run_classify_batched_repeat(
             if len(s):
                 orig_starts[sta] = min(tr.stats.starttime for tr in s)
 
-    from eqcctpro.timing_util import SeisBenchStageProbes
+    from rapid.orchestration.support.timing_util import SeisBenchStageProbes
 
     probes = SeisBenchStageProbes(model)
     cls_kw = dict(
@@ -634,7 +632,7 @@ def run_one_repeat(args) -> int:
     net_dir = _net_dir(args.net_root, args.dataset, args.n_stations, args.net_suffix)
 
     from rapid.data import select_stations
-    from eqcctpro.tools import ProcessTreeMemorySampler, process_tree_rss_mb
+    from rapid.orchestration.support.tools import ProcessTreeMemorySampler, process_tree_rss_mb
 
     stations = select_stations(net_dir, args.n_stations)
     trace_len = 3001 if args.net_suffix == "_w3001" else 6000
@@ -950,7 +948,7 @@ def main() -> int:
     ap.add_argument("--s-threshold", type=float, default=0.3)
     ap.add_argument("--min-separation", type=int, default=50)
     ap.add_argument("--tag", required=True)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
     ap.add_argument("--core-list", default="")
     ap.add_argument("--repeat-index", type=int, default=-1,

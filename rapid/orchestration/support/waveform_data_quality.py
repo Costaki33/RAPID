@@ -84,7 +84,7 @@ def log_known_waveform_quality_issues(
     if not meta:
         return
     st_set = {str(s).strip() for s in station_list}
-    lines = [f"Known miniSEED quality notes for timechunk {tid} (see eqcctpro.waveform_data_quality)."]
+    lines = [f"Known miniSEED quality notes for timechunk {tid} (see rapid.orchestration.support.waveform_data_quality)."]
     if "stations_strict_decode_failed" in meta:
         reg = set(meta["stations_strict_decode_failed"])
         hit = sorted(st_set & reg)

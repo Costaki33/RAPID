@@ -51,13 +51,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
-from eqcctpro import EvaluateSystem, RunEQCCTPro  # noqa: E402
-from eqcctpro.tools import resolve_ray_temp_dir  # noqa: E402
+from rapid.orchestration import EvaluateSystem, RunEQCCTPro  # noqa: E402
+from rapid.orchestration.support.tools import resolve_ray_temp_dir  # noqa: E402
 
 from scripts.build_seisbench_network import build_network  # noqa: E402
 from scripts.compare_orchestrated_picks import compare_network_picks  # noqa: E402
@@ -129,7 +127,7 @@ def _materialize_network_layout(
     Done once before timing/picks so EvaluateSystem's per-run materialize is a
     no-op and layout work is not charged to timing CSV rows.
     """
-    from eqcctpro.tools import materialize_input_into_timechunk_layout
+    from rapid.orchestration.support.tools import materialize_input_into_timechunk_layout
 
     net_dir = _net_dir(args.net_root, dataset, n_stations)
     times_list = _times_list_from_meta(meta, waveform_overlap=waveform_overlap)
@@ -576,7 +574,7 @@ def _do(args, *, dataset, n_stations, model_key, strategy, precision, meta):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument(
         "--results-root",
         type=Path,

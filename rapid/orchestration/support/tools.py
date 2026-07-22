@@ -689,7 +689,7 @@ def build_memory_trial_data(
     # Uses nvidia-ml-py (pynvml) to find exactly which of OUR processes are on the GPU and how much VRAM they're using
     actual_vram = 0.0
     if is_gpu_trial and process is not None and gpu_ids is not None:
-        from eqcctpro.tools import get_vram_by_pid
+        from rapid.orchestration.support.tools import get_vram_by_pid
         vram_by_pid = get_vram_by_pid(process, gpu_ids)
         actual_vram = vram_by_pid.get("process_vram_mb", 0)
         num_gpu_procs = vram_by_pid.get("num_gpu_processes", 0)
@@ -1444,7 +1444,7 @@ def merge_mseed_stream_after_read(temp_st) -> None:
 
     Prefer ``merge(method=1, fill_value=0)``; on failure (common with marginal Steim
     overlaps), fall back to ``merge(fill_value=0)``. Used by the driver preload,
-    EQCCT numpy path, and :func:`~eqcctpro.seisbench_models.mseed2stream_3c`.
+    EQCCT numpy path, and :func:`~rapid.orchestration.models.seisbench_models.mseed2stream_3c`.
     """
     try:
         temp_st.merge(method=1, fill_value=0)
@@ -2524,7 +2524,7 @@ def update_csv(csv_filepath, success, error_message):
         df["Trial Success"] = df["Trial Success"].astype("string")
 
     if df.empty:
-        logging.getLogger("eqcctpro").warning(
+        logging.getLogger("rapid").warning(
             "update_csv: %s has no data rows; skipping Trial Success update (no trial row to patch).",
             csv_filepath,
         )
@@ -2617,7 +2617,7 @@ def remove_output_subdirs(output_dir: str, logger: logging.Logger | None = None)
 Ensure each timechunk directory resolves to the same station inventory (after any
 ``abstracted_waveforms/`` expansion from flat miniSEED archives). For archives where
 station availability varies by day, set ``relax_timechunk_station_inventory=True``
-on :class:`eqcctpro.functionality.RunEQCCTPro` to skip this check so each chunk
+on :class:`rapid.orchestration.runtime.functionality.RunEQCCTPro` to skip this check so each chunk
 uses only the stations present in that chunk.
 """
 
@@ -2639,7 +2639,7 @@ def check_station_dirs(
             "No timechunk subdirectories (names like YYYYMMDDTHHMMSSZ_YYYYMMDDTHHMMSSZ) found under input_dir after "
             "materialization. Use per-station folders (e.g. input_dir/BB01/*.mseed), top-level *.mseed/*.sac, or "
             "pre-built input_dir/<timechunk_id>/ trees; set timechunk_dt with start_time/end_time so chunk folders "
-            "can be created. See TIMECHUNK_DT_REQUIRED_EXPLANATION in eqcctpro/tools.py or the README."
+            "can be created. See TIMECHUNK_DT_REQUIRED_EXPLANATION in rapid/orchestration/support/tools.py or the README."
         )
         return statement, [], True
 
@@ -2721,7 +2721,7 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
 
     # Normalize logger: if None, use a silent logger that discards records
     if logger is None:
-        logger = logging.getLogger("eqcctpro.null")
+        logger = logging.getLogger("rapid.null")
         logger.propagate = False
         if not logger.handlers:
             # logger.addHandler(logging.StreamHandler())

@@ -61,10 +61,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
 from rapid.benchmark import fairness  # noqa: E402
 from rapid.benchmark.fairness import StageTimes, build_result, pin_threads  # noqa: E402
@@ -171,7 +169,7 @@ def run_one_repeat(args) -> int:
     ):
         os.environ[key] = "1"
 
-    from eqcctpro.tools import ProcessTreeMemorySampler, process_tree_rss_mb
+    from rapid.orchestration.support.tools import ProcessTreeMemorySampler, process_tree_rss_mb
 
     sampler = ProcessTreeMemorySampler(interval_s=0.5)
     sampler.start()
@@ -219,7 +217,7 @@ def run_one_repeat(args) -> int:
                 pass
             else:
                 import ray
-                from eqcctpro.tools import resolve_ray_temp_dir
+                from rapid.orchestration.support.tools import resolve_ray_temp_dir
 
                 ray.init(
                     num_cpus=n_cpus,
@@ -242,7 +240,7 @@ def run_one_repeat(args) -> int:
                     amodel.to(torch.device("cuda:0"))
                 actors = []
             elif slip:
-                from eqcctpro.slipstream_actor import SlipstreamSeisBenchModelActor as ActorCls
+                from rapid.orchestration.actors.slipstream_actor import SlipstreamSeisBenchModelActor as ActorCls
 
                 remote_kwargs = dict(
                     parent_model_name=m["parent"],
@@ -255,7 +253,7 @@ def run_one_repeat(args) -> int:
                     lean_batch_size=int(args.slipstream_batch_size),
                 )
             else:
-                from eqcctpro.parallelization import SeisBenchModelActor as ActorCls
+                from rapid.orchestration.actors.parallelization import SeisBenchModelActor as ActorCls
 
                 remote_kwargs = dict(
                     parent_model_name=m["parent"],
@@ -655,7 +653,7 @@ def main() -> int:
     ap.add_argument("--s-threshold", type=float, default=0.3)
     ap.add_argument("--detection-threshold", type=float, default=0.3)
     ap.add_argument("--tag", required=True)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
     # Short Ray temp dir on /home (see run_fair_orch_trial.py): the long vendored
     # path overflows Ray's 107-byte AF_UNIX socket limit and falls back to /tmp.

@@ -47,4 +47,4 @@ Homepage = "https://github.com/ut-beg-texnet/eqcct"
 Repository = "https://github.com/ut-beg-texnet/eqcct"
 
 [tool.setuptools.packages.find]
-include = ["rapid*", "eqcctpro*"]
+include = ["rapid*"]

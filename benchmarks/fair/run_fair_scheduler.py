@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
 
 DATASETS = ["stead", "txed"]
 STATION_COUNTS = [250, 580]
@@ -675,7 +674,7 @@ def main() -> int:
     ap.add_argument("--total-cpus", type=int, default=min(os.cpu_count() or 8, 120))
     ap.add_argument("--p-threshold", type=float, default=0.3)
     ap.add_argument("--s-threshold", type=float, default=0.3)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
     ap.add_argument("--log-dir", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark" / "_logs")
     ap.add_argument("--poll-s", type=float, default=1.0)

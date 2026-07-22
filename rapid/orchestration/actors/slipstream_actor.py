@@ -18,14 +18,15 @@ import numpy as np
 import ray
 from obspy import Stream, UTCDateTime
 
-from eqcctpro.timing_util import cuda_synchronize_best_effort
+from rapid.orchestration.support.timing_util import cuda_synchronize_best_effort
 
 
 def _ensure_rapid_on_path() -> None:
-    rap = Path(__file__).resolve().parents[1] / "RAPID"
-    rap_s = str(rap)
-    if rap_s not in sys.path:
-        sys.path.insert(0, rap_s)
+    # rapid/orchestration/actors/thisfile.py -> repo root (…/RAPID)
+    root = Path(__file__).resolve().parents[3]
+    root_s = str(root)
+    if root_s not in sys.path:
+        sys.path.insert(0, root_s)
 
 
 def _window_start_indices(T: int, in_samples: int, overlap_samples: int) -> List[int]:
@@ -101,7 +102,7 @@ def lean_classify_stream(
     Returns ``SimpleNamespace(picks=[...])`` mirroring SeisBench ClassifyOutput.
     """
     _ensure_rapid_on_path()
-    from eqcctpro.timing_util import monotonic_s
+    from rapid.orchestration.support.timing_util import monotonic_s
     from rapid.data import preprocess_for_model, stream_to_3c_array, WindowSpec, window_from_array
     from rapid.seisbench_precision_eval import phase_indices
 
@@ -183,7 +184,7 @@ class SlipstreamSeisBenchModelActor:
         overlap_samples: int = 0,
         lean_batch_size: int = 256,
     ):
-        self.logger = logging.getLogger("eqcctpro.slipstream_model_actor")
+        self.logger = logging.getLogger("rapid.slipstream_model_actor")
         self.logger.setLevel(logging.INFO)
         self.logger.handlers[:] = []
         self.logger.propagate = False
@@ -279,7 +280,7 @@ class SlipstreamSeisBenchModelActor:
         """
         del kwargs
         _ensure_rapid_on_path()
-        from eqcctpro.timing_util import monotonic_s
+        from rapid.orchestration.support.timing_util import monotonic_s
         from rapid.data import WindowSpec, window_from_array
         from rapid.seisbench_precision_eval import phase_indices
 

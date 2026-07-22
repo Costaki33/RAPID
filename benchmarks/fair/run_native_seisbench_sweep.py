@@ -41,10 +41,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
 from rapid.data import load_all_streams, load_station_stream, preprocess_for_model, select_stations  # noqa: E402
 from rapid.runners.single_gpu import run_baseline_single  # noqa: E402
@@ -448,7 +446,7 @@ def _do(args, *, dataset, n_stations, model_key, method, n_cpus, gpu_ids, device
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument(
         "--results-root",
         type=Path,

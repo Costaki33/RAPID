@@ -7,12 +7,12 @@ import random
 import logging
 from pathlib import Path
 
-from eqcctpro.tools import (
+from rapid.orchestration.support.tools import (
     merge_mseed_stream_after_read,
     parent_timechunk_station_waveform_files,
     read_station_waveform_file,
 )
-from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+from rapid.orchestration.support.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 
 class SeisBenchModels:
     def __init__(self, parent_model_name, child_model_name, validate_pretrained=True):
@@ -293,7 +293,7 @@ def _station_3c_from_merged_stream(args, st, station):
         and trZ is None
     ):
         chans = [tr.stats.channel for tr in st]
-        logging.getLogger("eqcctpro").warning(
+        logging.getLogger("rapid").warning(
             "Station %s: could not map ENZ from channel names %s; "
             "using first three traces in lexicographic channel order as E, N, Z "
             "(set EQCCTPRO_STRICT_3C=1 to forbid).",
@@ -327,7 +327,7 @@ def _station_3c_from_merged_stream(args, st, station):
                 f"No template trace to align zero-fill for station {station}. "
                 f"Available channels: {available_channels}."
             )
-        log = logging.getLogger("eqcctpro")
+        log = logging.getLogger("rapid")
         filled_labels = []
         if trE is None:
             trE = _zero_trace_like(template, "E")

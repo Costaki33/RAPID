@@ -1,10 +1,11 @@
 # RAPID
 
-RAPID (Resource-Aware Parallel Inference Dispatcher) is a toolkit for running
-and benchmarking deep-learning seismic phase pickers on whole station networks.
-It packages lean inference (Slipstream), Ray-based orchestration (Model-Actor
-and Ripper), and a fair deployment benchmark so you can compare strategies on
-the same waveforms and the same pick-quality scores.
+RAPID (Resource-Aware Parallel Inference Dispatcher) is a toolkit for
+**real-time** deep-learning seismic phase picking on whole station networks. It
+packages lean inference (Slipstream), Ray-based orchestration (Model-Actor and
+Ripper), and a fair deployment benchmark so you can compare strategies on the
+same waveforms and the same pick-quality scores — and keep up with continuous
+60-second network windows.
 
 ## Background
 
@@ -18,36 +19,92 @@ running in production at TexNet today.
 
 RAPID is the next step of that line of work: the same orchestration ideas,
 extended with Slipstream (lean reduced-precision inference) and a fair
-deployment benchmark across models, devices, and scheduling strategies. The
-central finding is that **how you parallelize the work matters more than the
-device alone** — a pool of persistent, single-threaded workers (Model-Actor)
-keeps a many-core CPU busy on heavy models where a single-process picker leaves
-cores idle. Slipstream is a forward path that can run inside that pool; it is
-not a competing orchestrator.
+deployment benchmark across models, devices, and scheduling strategies. EQCCTPro
+as a standalone package is deprecated; install and import RAPID going forward.
+The orchestration runtime that began in EQCCTPro now lives under
+`rapid/orchestration/`.
 
-EQCCTPro as a standalone package is deprecated in favor of RAPID. Install and
-import RAPID going forward; the orchestration code that began in EQCCTPro now
-ships here (under `eqcctpro/` inside this repo, and via the `rapid` PyPI
-package).
+The central finding is that **how you parallelize the work matters more than the
+device alone**. A pool of persistent, single-threaded workers (Model-Actor) keeps
+a many-core CPU busy on heavy models where a single-process Classify or Annotate
+call leaves cores idle. Slipstream is a forward path that can run inside that
+pool; it is not a competing orchestrator.
 
-Supported SeisBench models: PhaseNet, PhaseNetLight, EQTransformer, and EQT-NC
+On a 20-core CPU allocation, warm Model-Actor finished a 60-second, 580-station
+window in about 1.3–2.3 s across four SeisBench pickers (p99 under 2.5 s).
+Single-process Annotate averaged 1.5–11.7 s on the same CPU but with heavy-model
+p99 latencies near 30 s. Model-Actor on CPU also beat single-GPU Annotate on the
+heavier models (roughly 15% faster on average, up to about 34% for EQT-NC).
+
+Supported models: PhaseNet, PhaseNetLight, EQTransformer, and EQT-NC
 (non-conservative EQTransformer). EQCCT is planned once it lands in SeisBench.
+
+### Measured speedups (isolated re-measurement)
+
+Hardware: AMD Threadripper PRO 7985WX, 512 GB RAM, two NVIDIA RTX 6000 Ada
+(49 GB). Workload: STEAD synthetic network, **580 stations**, native model
+windows. Values are **mean seconds** per network window. Bold marks the fastest
+method for that model within each table.
+
+**CPU — 20 cores.** Classify is single-process SeisBench `classify()` at its
+best thread setting (1 intra-op thread), cold end-to-end over **3 repeats**.
+Annotate, Model-Actor[classify], and Model-Actor[Slipstream-BF16] are **warm**
+streaming means: **10 repeats × 8 feeds**, first feed discarded (**70**
+steady-state windows per cell).
+
+| Model | Classify | Annotate | Model-Actor[classify] | Model-Actor[Slipstream-BF16] |
+| --- | ---: | ---: | ---: | ---: |
+| PhaseNet | 5.52 | 1.52 | 1.35 | **1.29** |
+| PhaseNetLight | 4.71 | 3.40 | 1.34 | **1.29** |
+| EQTransformer | 22.51 | 8.88 | 2.28 | **2.16** |
+| EQT-NC | 13.65 | 11.72 | **1.87** | 1.88 |
+
+**GPU — one RTX 6000 Ada (host pinned to 20 cores), same warm protocol**
+(10 × 7 windows), plus a two-GPU Model-Actor[classify] column (5 repeats × 7
+windows). Annotate on one GPU is fastest for every model; the actor pool helps
+most when you stay on CPU.
+
+| Model | Annotate (1 GPU) | Model-Actor[classify] (1 GPU) | Model-Actor[Slipstream-BF16] (1 GPU) | Model-Actor[classify] (2 GPUs) |
+| --- | ---: | ---: | ---: | ---: |
+| PhaseNet | **1.37** | 1.81 | 1.52 | 1.81 |
+| PhaseNetLight | **1.38** | 1.58 | 1.45 | 1.54 |
+| EQTransformer | **2.93** | 9.10 | 9.30 | 5.18 |
+| EQT-NC | **2.85** | 4.74 | 5.11 | 3.03 |
+
+**GPU Model-Actor[classify] by host CPU count** (warm mean, 580 stations; 5
+repeats × 7 windows at 5/10/15 cores, 10 × 7 at 20 cores). Annotate on one GPU
+(20 host cores) is shown for reference.
+
+| Model | 5 cores | 10 cores | 15 cores | 20 cores | Annotate (1 GPU, 20 cores) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PhaseNet | 2.94 | 2.47 | 1.88 | 1.81 | **1.37** |
+| PhaseNetLight | 2.15 | 1.97 | 1.68 | 1.58 | **1.38** |
+| EQTransformer | 9.82 | 9.13 | 9.10 | 9.10 | **2.93** |
+| EQT-NC | 5.85 | 4.91 | 4.66 | 4.74 | **2.85** |
 
 ## What's in the repo
 
 ```
-eqcctpro/           Orchestration (Model-Actor, Ripper, Slipstream actors)
-rapid/              Lean inference backends and fair-benchmark machinery
-examples/           Build synthetic networks and run a first pick
+rapid/
+  api.py                 Single-process annotate / classify / slipstream
+  backends/              Lean PyTorch + SeisBench baseline backends
+  benchmark/             Fair-benchmark timing, memory, pick scoring
+  orchestration/         Ray Model-Actor / Ripper / Slipstream (ex-EQCCTPro)
+    api.py               pick(), model_actor(), ripper()
+    runtime/             RunEQCCTPro, EvaluateSystem
+    actors/              parallelization.py, slipstream_actor.py
+    models/              SeisBench + EQCCT TF model wrappers
+    support/             tools, timing, picks, waveform helpers
+examples/                Build synthetic networks and run a first pick
 benchmarks/
-  fair/             Fair deployment matrix, latency and oversubscription sweeps
-  isolation/        Sequential, contention-free re-measurements
-  analysis/         Summaries, pick-quality scoring, table generators
-configs/            JSON configs for matrix / dtype sweeps
+  fair/                  Fair matrix, latency / oversubscription sweeps
+  isolation/             Sequential, contention-free re-measurements
+  analysis/              Summaries and pick-quality aggregation
+configs/                 JSON configs for matrix / dtype sweeps
 ```
 
-Runtime outputs (`results/`, `figures/`, `logs/`, `data/`) are created locally
-and are not part of the published tree.
+Runtime outputs (`results/`, `figures/`, `logs/`, `data/`) stay local and are
+gitignored.
 
 ## Installation
 
@@ -186,8 +243,8 @@ bash benchmarks/isolation/run_iso_full.sh
 ```
 
 For longer system sweeps (core budgets, concurrency step sizes, GPU marches),
-`eqcctpro.EvaluateSystem` remains available; the fair runners above are the
-usual entry point for publication-style comparisons.
+`rapid.EvaluateSystem` remains available; the fair runners above are the usual
+entry point for publication-style comparisons.
 
 Pick-quality scoring against a network manifest:
 

@@ -22,10 +22,10 @@ import logging
 import platform
 import traceback
 import numpy as np
-from eqcctpro.tools import *
-from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
-from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
-from eqcctpro.pick_output import (
+from rapid.orchestration.support.tools import *
+from rapid.orchestration.support.timing_util import cuda_synchronize_best_effort, monotonic_s
+from rapid.orchestration.support.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+from rapid.orchestration.support.pick_output import (
     PickOutputSink,
     aggregate_station_mseed_for_summary,
     ascii_summary_results_path,
@@ -43,7 +43,7 @@ from eqcctpro.pick_output import (
     refresh_executive_picks_summary_from_chunk_output_dir,
     write_station_pick_log,
 )
-from eqcctpro.waveform_data_quality import log_known_waveform_quality_issues
+from rapid.orchestration.support.waveform_data_quality import log_known_waveform_quality_issues
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -477,7 +477,7 @@ _SLIPSTREAM_SB_MODEL_CACHE: dict = {}
 def _slipstream_seisbench_model(parent: str, child: str):
     key = (parent, child)
     if key not in _SLIPSTREAM_SB_MODEL_CACHE:
-        from eqcctpro.seisbench_models import SeisBenchModels
+        from rapid.orchestration.models.seisbench_models import SeisBenchModels
 
         sb = SeisBenchModels(parent, child)
         _SLIPSTREAM_SB_MODEL_CACHE[key] = sb.load_model()
@@ -492,7 +492,7 @@ def _slipstream_arrays_from_station(args, station, files_list, st_sel, use_share
     """
     from rapid.data import preprocess_for_model, stream_to_3c_array
 
-    from eqcctpro.seisbench_models import (
+    from rapid.orchestration.models.seisbench_models import (
         mseed2stream_for_slipstream,
         process_raw_station_stream_for_slipstream,
     )
@@ -723,7 +723,7 @@ def _apply_log_chunk_prefix(args: dict | None, msg: str) -> str:
 
 
 def _glob_waveform_files_in_dir(station_dir: str) -> list[str]:
-    """Delegate to :func:`~eqcctpro.tools.glob_waveform_files_in_directory` (single glob implementation)."""
+    """Delegate to :func:`~rapid.orchestration.support.tools.glob_waveform_files_in_directory` (single glob implementation)."""
     return glob_waveform_files_in_directory(station_dir)
 
 
@@ -742,7 +742,7 @@ def _list_station_mseed_files(input_dir: str, station: str) -> list[str]:
 
     If chunk-local paths exist but **decode to no traces** (empty or corrupt copies),
     :func:`_load_ripper_mseed_stream`, :func:`_mseed2nparray`, and
-    :func:`~eqcctpro.seisbench_models.mseed2stream_3c` try the same parent directory
+    :func:`~rapid.orchestration.models.seisbench_models.mseed2stream_3c` try the same parent directory
     (skipping paths already read from the chunk) so good originals next to the chunk
     folders are still used.
     """
@@ -1480,7 +1480,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
     # Set up logger that will write logs to this native process and add them to the log.queue to be added back to the main logger outside of this Raylet
     # worker logger ships records to driver
-    logger = logging.getLogger("eqcctpro.worker")
+    logger = logging.getLogger("rapid.worker")
     logger.setLevel(logging.INFO)
     logger.handlers[:] = []
     logger.propagate = False
@@ -1592,7 +1592,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         logger.error("")
         sys.exit(1)
     
-    from eqcctpro.tools import build_station_list_from_dir
+    from rapid.orchestration.support.tools import build_station_list_from_dir
 
     def _prepare_stations_tasks_for_chunk(c_input_dir, c_timechunk_id):
         """Build ``tasks_predictor`` and related paths for one timechunk directory."""
@@ -2162,7 +2162,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 # a thundering herd of concurrent list_pretrained() requests causing HTTP 500s.
                 logger.info(f"Validating SeisBench model name: {seisbench_parent_model}/{seisbench_child_model}...")
                 try:
-                    from eqcctpro.seisbench_models import SeisBenchModels
+                    from rapid.orchestration.models.seisbench_models import SeisBenchModels
                     SeisBenchModels(seisbench_parent_model, seisbench_child_model, validate_pretrained=True)
                     logger.info("SeisBench model name validated successfully.")
                 except Exception as e:
@@ -2947,7 +2947,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
 @ray.remote
 class ModelActor:
     def __init__(self,  p_model_path, s_model_path, gpus_to_use=False, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
-        self.logger = logging.getLogger("eqcctpro.model_actor")
+        self.logger = logging.getLogger("rapid.model_actor")
         self.logger.setLevel(logging.INFO)
         self.logger.handlers[:] = []
         self.logger.propagate = False
@@ -2977,7 +2977,7 @@ class ModelActor:
         
         # Load the model once
         self.logger.info("Importing/load_eqcct_model...")
-        from eqcctpro.eqcct_tf_models import load_eqcct_model
+        from rapid.orchestration.models.eqcct_tf_models import load_eqcct_model
         self.model = load_eqcct_model(p_model_path, s_model_path)
         self.logger.info("Model loaded.")
     
@@ -2990,7 +2990,7 @@ class ModelActor:
         return self.model.predict(data_generator, verbose=0)
     
     def predict_from_arrays(self, trace_start_time, data_set, batch_size, norm_mode):
-        from eqcctpro.eqcct_tf_models import PreLoadGeneratorTest
+        from rapid.orchestration.models.eqcct_tf_models import PreLoadGeneratorTest
         pred_generator = PreLoadGeneratorTest(trace_start_time, data_set,
                                             batch_size=batch_size, norm_mode=norm_mode)
         return self.model.predict(pred_generator, verbose=0)
@@ -3013,7 +3013,7 @@ def _create_seisbench_model_actors(
 ):
     """Create SeisBench or Slipstream Model-Actor Ray workers."""
     if slipstream_inference:
-        from eqcctpro.slipstream_actor import SlipstreamSeisBenchModelActor
+        from rapid.orchestration.actors.slipstream_actor import SlipstreamSeisBenchModelActor
 
         actor_cls = SlipstreamSeisBenchModelActor
         remote_kwargs = dict(
@@ -3058,7 +3058,7 @@ class SeisBenchModelActor:
     Similar to ModelActor but for SeisBench models (PyTorch-based).
     """
     def __init__(self, parent_model_name, child_model_name, gpus_to_use=False, use_gpu=True):
-        self.logger = logging.getLogger("eqcctpro.seisbench_model_actor")
+        self.logger = logging.getLogger("rapid.seisbench_model_actor")
         self.logger.setLevel(logging.INFO)
         self.logger.handlers[:] = []
         self.logger.propagate = False
@@ -3088,7 +3088,7 @@ class SeisBenchModelActor:
 
         # Load the SeisBench model (skip validation — driver already verified the model name)
         self.logger.info("Loading SeisBench model...")
-        from eqcctpro.seisbench_models import SeisBenchModels
+        from rapid.orchestration.models.seisbench_models import SeisBenchModels
         self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
         self.model_wrapper.load_model()
 
@@ -3106,7 +3106,7 @@ class SeisBenchModelActor:
         # aggregation inside classify() so the driver gets measured per-stage
         # times instead of one opaque classify wall time.
         try:
-            from eqcctpro.timing_util import SeisBenchStageProbes
+            from rapid.orchestration.support.timing_util import SeisBenchStageProbes
             self._stage_probes = SeisBenchStageProbes(self.model_wrapper.model)
         except Exception as e:
             self.logger.warning(f"Stage probes unavailable: {e}")
@@ -3192,7 +3192,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     import shutil
     import logging
     from logging.handlers import QueueHandler
-    from eqcctpro.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
+    from rapid.orchestration.models.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
 
     if len(predict_args) == 5:
         pos, station, out_dir, args_ref, stream_ref = predict_args
@@ -3208,7 +3208,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         return _apply_log_chunk_prefix(args, msg)
 
     # Set up logger to forward to the main listener
-    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+    logger = logging.getLogger(f"rapid.worker.{station}")
     logger.setLevel(logging.INFO)
     if args.get('log_queue') is not None:
         logger.addHandler(QueueHandler(args['log_queue']))
@@ -3504,7 +3504,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         # If eqcct_tf_models imports TF later, env vars above will still suppress C++ logs.
         pass
 
-    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+    from rapid.orchestration.models.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
 
     if len(predict_args) == 5:
         pos, station, out_dir, args_ref, stream_ref = predict_args
@@ -3517,7 +3517,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     def _pfx(msg: str) -> str:
         return _apply_log_chunk_prefix(args, msg)
 
-    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+    logger = logging.getLogger(f"rapid.worker.{station}")
 
     # NOTE: Model is shared via model_actor when model_actor is not None
 
@@ -3575,12 +3575,12 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                 logger.info("RIPPER MODE: Loading EQCCT model inside task...")
                 # Configure GPU for this specific task process
                 if gpu:
-                    from eqcctpro.tools import tf_environ
+                    from rapid.orchestration.support.tools import tf_environ
                     # Set a per-task VRAM limit if provided in args
                     vram_limit = args.get('gpu_memory_limit_mb')
                     tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
 
-                from eqcctpro.eqcct_tf_models import load_eqcct_model
+                from rapid.orchestration.models.eqcct_tf_models import load_eqcct_model
                 _ml_start = monotonic_s()
                 model = load_eqcct_model(args['p_model'], args['s_model'])
                 model_load_task_time = monotonic_s() - _ml_start
@@ -3757,14 +3757,14 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     
     if gpu is True: 
         # Use unified tf_environ for stable GPU memory management
-        from eqcctpro.tools import tf_environ
+        from rapid.orchestration.support.tools import tf_environ
         try:
             # Ripper mode tasks see 1 fractional GPU each (via Ray scheduling)
             # so we just initialize that one GPU
             tf_environ(
                 gpu_id=0, 
                 vram_limit_mb=gpu_memory_limit_mb,
-                logger=logging.getLogger("eqcctpro.ripper")
+                logger=logging.getLogger("rapid.ripper")
             )
         except (RuntimeError, ValueError):
             pass  # Already initialized or logical devices configured
@@ -3786,7 +3786,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     except Exception:
         pass
 
-    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+    from rapid.orchestration.models.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
 
     if len(predict_args) == 5:
         pos, station, out_dir, args_ref, stream_ref = predict_args
@@ -3975,7 +3975,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     # * default: SeisBench model via SeisBenchModels -> model.classify() end-to-end
     # * slipstream_inference: RAPID lean PyTorch backend -> lean_classify_stream()
     #   (same pipeline as the Slipstream Model-Actor, but loaded per task)
-    from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c, process_raw_station_stream_3c
+    from rapid.orchestration.models.seisbench_models import SeisBenchModels, mseed2stream_3c, process_raw_station_stream_3c
     import torch
 
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
@@ -3988,7 +3988,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     model_wrapper = None
     stage_probes = None
     if use_slipstream:
-        from eqcctpro.slipstream_actor import _ensure_rapid_on_path
+        from rapid.orchestration.actors.slipstream_actor import _ensure_rapid_on_path
 
         _ensure_rapid_on_path()
         from rapid.backends.lean_pytorch import LeanPyTorchBackend
@@ -4015,7 +4015,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                 pass
         # Stage probes: measured preprocess + pick aggregation inside classify().
         try:
-            from eqcctpro.timing_util import SeisBenchStageProbes
+            from rapid.orchestration.support.timing_util import SeisBenchStageProbes
             stage_probes = SeisBenchStageProbes(model_wrapper.model)
         except Exception:
             stage_probes = None
@@ -4113,7 +4113,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             # ===== TIMING: inference (model forward pass) =====
             inference_start = monotonic_s()
             if use_slipstream:
-                from eqcctpro.slipstream_actor import lean_classify_stream
+                from rapid.orchestration.actors.slipstream_actor import lean_classify_stream
 
                 classify_output = lean_classify_stream(
                     lean_backend,

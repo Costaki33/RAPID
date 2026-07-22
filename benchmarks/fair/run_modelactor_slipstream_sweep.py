@@ -39,11 +39,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Repo roots
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-if str(EQCCTPRO_ROOT) not in sys.path:
-    sys.path.insert(0, str(EQCCTPRO_ROOT))
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
-from eqcctpro import EvaluateSystem  # noqa: E402
+from rapid.orchestration import EvaluateSystem  # noqa: E402
 
 # Paper models (SeisBench) + EQCCT (classify/Model-Actor only; no Slipstream)
 MODELS: Dict[str, Dict[str, Any]] = {
@@ -188,8 +187,8 @@ def _run_one_trial(
             **common,
         )
     else:
-        p_path = str(EQCCTPRO_ROOT / m["p_model"])
-        s_path = str(EQCCTPRO_ROOT / m["s_model"])
+        p_path = str(RAPID_ROOT / m["p_model"])
+        s_path = str(RAPID_ROOT / m["s_model"])
         ev = EvaluateSystem(
             model_type="eqcct",
             p_model_filepath=p_path,
@@ -212,18 +211,18 @@ def main() -> int:
     ap.add_argument(
         "--input-dir",
         type=Path,
-        default=EQCCTPRO_ROOT / "data/230_stations_1_min_dt/20241215T120000Z_20241215T120100Z",
+        default=RAPID_ROOT / "data/230_stations_1_min_dt/20241215T120000Z_20241215T120100Z",
         help="TexNet timechunk directory (flat or per-station layout)",
     )
     ap.add_argument(
         "--output-dir",
         type=Path,
-        default=EQCCTPRO_ROOT / "results/modelactor_slipstream/picks",
+        default=RAPID_ROOT / "results/modelactor_slipstream/picks",
     )
     ap.add_argument(
         "--csv-root",
         type=Path,
-        default=EQCCTPRO_ROOT / "results/modelactor_slipstream/csv",
+        default=RAPID_ROOT / "results/modelactor_slipstream/csv",
     )
     ap.add_argument("--tmp-dir", type=Path, default=Path("/lambda1a/skevofilaxc/tmp"))
     ap.add_argument("--start-time", default="2024-12-15 12:00:00")

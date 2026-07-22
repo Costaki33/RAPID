@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-from .functionality import RunEQCCTPro
+from .runtime.functionality import RunEQCCTPro
 
 PathLike = Union[str, Path]
 

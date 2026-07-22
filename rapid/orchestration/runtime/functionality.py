@@ -16,13 +16,13 @@ import numbers
 import logging
 import resource
 import threading
-from eqcctpro.tools import *
+from rapid.orchestration.support.tools import *
 from pathlib import Path
-from eqcctpro.parallelization import *
+from rapid.orchestration.actors.parallelization import *
 from obspy import UTCDateTime
 from ray.util.queue import Queue
 from datetime import datetime, timedelta
-from eqcctpro.tools import _parse_gpus_field
+from rapid.orchestration.support.tools import _parse_gpus_field
 from logging.handlers import QueueHandler, QueueListener
 
 
@@ -171,7 +171,7 @@ class RunEQCCTPro():
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
-        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger = logging.getLogger("rapid") # We named the logger eqcctpro (can be any name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
         if not self.logger.handlers: # avoid duplicating inits 
@@ -205,7 +205,7 @@ class RunEQCCTPro():
 
             # Determine model VRAM requirement based on model type
             if self.model_type == 'seisbench':
-                from .parallelization import get_seisbench_model_vram_mb
+                from ..actors.parallelization import get_seisbench_model_vram_mb
                 model_vram_mb = get_seisbench_model_vram_mb(
                     self.seisbench_parent_model, 
                     self.seisbench_child_model,
@@ -796,7 +796,7 @@ class EvaluateSystem():
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
-        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger = logging.getLogger("rapid") # We named the logger eqcctpro (can be any name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
         if not self.logger.handlers: # avoid duplicating inits 
@@ -841,7 +841,7 @@ class EvaluateSystem():
 
             # Determine model VRAM requirement based on model type
             if self.model_type == 'seisbench':
-                from eqcctpro.parallelization import get_seisbench_model_vram_mb
+                from rapid.orchestration.actors.parallelization import get_seisbench_model_vram_mb
                 model_vram_mb = get_seisbench_model_vram_mb(
                     self.seisbench_parent_model, 
                     self.seisbench_child_model,
@@ -849,7 +849,7 @@ class EvaluateSystem():
                     logger=self.logger
                 )
             else:
-                from eqcctpro.parallelization import get_eqcct_vram_mb
+                from rapid.orchestration.actors.parallelization import get_eqcct_vram_mb
                 model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
 
             per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
@@ -1126,7 +1126,7 @@ class EvaluateSystem():
         
         # Get actual station count from the first timechunk directory to ensure skip logic 
         # accounts for stations being filtered out due to missing data.
-        from eqcctpro.tools import build_station_list_from_dir
+        from rapid.orchestration.support.tools import build_station_list_from_dir
         mseed_timechunk_dir_name = self.tasks_picker[0][1]
         timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
         available_stations = len(build_station_list_from_dir(timechunk_dir_path))
@@ -1222,7 +1222,7 @@ class EvaluateSystem():
                 # Determine model name and RAM requirement from empirical data
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
-                    from eqcctpro.parallelization import get_seisbench_model_ram_mb
+                    from rapid.orchestration.actors.parallelization import get_seisbench_model_ram_mb
                     model_ram_per_actor_mb = get_seisbench_model_ram_mb(
                         self.seisbench_parent_model, 
                         self.seisbench_child_model,
@@ -1232,11 +1232,11 @@ class EvaluateSystem():
                     )
                 else:
                     trial_model = "eqcct"
-                    from eqcctpro.parallelization import get_eqcct_ram_mb
+                    from rapid.orchestration.actors.parallelization import get_eqcct_ram_mb
                     model_ram_per_actor_mb = get_eqcct_ram_mb(use_gpu=False)  # CPU mode
                 
                 # Import buffer constants for logging clarity
-                from eqcctpro.parallelization import RAM_BUFFER_MB
+                from rapid.orchestration.actors.parallelization import RAM_BUFFER_MB
                 
                 # Additional per-task overhead for waveform data buffers and intermediate results
                 # (Note: The main safety buffer is already included in model_ram_per_actor_mb)
@@ -1388,7 +1388,7 @@ class EvaluateSystem():
                                     "Error Message": error_msg,
                                     "Comments": oom_comment,
                                 }
-                                from eqcctpro.parallelization import append_trial_row
+                                from rapid.orchestration.actors.parallelization import append_trial_row
                                 append_trial_row(csv_filepath, trial_data)
                                 append_trial_result_json(
                                     csv_filepath,
@@ -1721,7 +1721,7 @@ class EvaluateSystem():
         
         # Normalize existing CSV to ensure consistent "GPUs Used" formatting and quoting
         if os.path.exists(csv_filepath):
-            from eqcctpro.tools import normalize_gpu_csv_quoting
+            from rapid.orchestration.support.tools import normalize_gpu_csv_quoting
             normalize_gpu_csv_quoting(csv_filepath)
             self.logger.info("Normalized existing CSV entries for consistent 'GPUs Used' formatting.")
         
@@ -1764,7 +1764,7 @@ class EvaluateSystem():
 
         # Get actual station count from the first timechunk directory to ensure skip logic 
         # accounts for stations being filtered out due to missing data.
-        from eqcctpro.tools import build_station_list_from_dir
+        from rapid.orchestration.support.tools import build_station_list_from_dir
         mseed_timechunk_dir_name = self.tasks_picker[0][1]
         timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
         available_stations = len(build_station_list_from_dir(timechunk_dir_path))
@@ -1862,7 +1862,7 @@ class EvaluateSystem():
                 # Determine model name, VRAM, and RAM requirements from empirical data
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
-                    from eqcctpro.parallelization import get_seisbench_model_vram_mb, get_seisbench_model_ram_mb
+                    from rapid.orchestration.actors.parallelization import get_seisbench_model_vram_mb, get_seisbench_model_ram_mb
                     model_vram_per_actor_mb = get_seisbench_model_vram_mb(
                         self.seisbench_parent_model, 
                         self.seisbench_child_model,
@@ -1879,12 +1879,12 @@ class EvaluateSystem():
                 else:
                     trial_model = "eqcct"
                     # Use the measured EQCCT requirements (includes CUDA context + TensorFlow + XLA)
-                    from eqcctpro.parallelization import get_eqcct_vram_mb, get_eqcct_ram_mb
+                    from rapid.orchestration.actors.parallelization import get_eqcct_vram_mb, get_eqcct_ram_mb
                     model_vram_per_actor_mb = get_eqcct_vram_mb()
                     model_ram_per_actor_mb = get_eqcct_ram_mb(use_gpu=True)
 
                 # Import buffer constants for logging clarity
-                from eqcctpro.parallelization import VRAM_BUFFER_MB, RAM_BUFFER_MB
+                from rapid.orchestration.actors.parallelization import VRAM_BUFFER_MB, RAM_BUFFER_MB
                 
                 # Additional per-task overhead for waveform data buffers and intermediate results
                 # (Note: The main safety buffer is already included in model_*_per_actor_mb)
@@ -2078,7 +2078,7 @@ class EvaluateSystem():
                                 "Error Message": error_msg,
                                 "Comments": oom_comment,
                             }
-                            from eqcctpro.parallelization import append_trial_row
+                            from rapid.orchestration.actors.parallelization import append_trial_row
                             append_trial_row(csv_filepath, trial_data)
                             append_trial_result_json(
                                 csv_filepath,
@@ -2485,7 +2485,7 @@ class OptimalCPUConfigurationFinder:
         self.log_file_path = log_file_path
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
-        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger = logging.getLogger("rapid") # We named the logger eqcctpro (can be any name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
         if not self.logger.handlers: # avoid duplicating inits 
@@ -2605,7 +2605,7 @@ class OptimalGPUConfigurationFinder:
         self.log_file_path = log_file_path
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
-        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger = logging.getLogger("rapid") # We named the logger eqcctpro (can be any name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
         if not self.logger.handlers: # avoid duplicating inits 

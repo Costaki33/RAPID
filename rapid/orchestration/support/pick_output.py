@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from xml.sax.saxutils import escape
 
-from eqcctpro.tools import looks_like_timechunk_id
+from rapid.orchestration.support.tools import looks_like_timechunk_id
 
 PICK_RESULT_COLUMNS = (
     "file_name",
@@ -43,7 +43,7 @@ ASCII_RUN_SUMMARY_COLUMNS = (
     "MSEED_errors",
 )
 
-# Tag keys from :func:`~eqcctpro.tools._read_mseed_best_effort` reports (and ``decode_failed``).
+# Tag keys from :func:`~rapid.orchestration.support.tools._read_mseed_best_effort` reports (and ``decode_failed``).
 # Shown in ``MSEED_errors`` column; full text in docs: ``docs/summary_results_mseed_columns.md``.
 MSEED_ERROR_TAG_GLOSSARY: dict[str, str] = {
     "per_channel_longest_prefix": (
@@ -72,7 +72,7 @@ MSEED_ERROR_TAG_GLOSSARY: dict[str, str] = {
 def aggregate_station_mseed_for_summary(file_reports: list[dict]) -> dict[str, str]:
     """
     Build three display strings for the ASCII summary row from per-file ``report`` dicts
-    (same structure as :func:`~eqcctpro.tools.read_station_waveform_file` miniSEED reports).
+    (same structure as :func:`~rapid.orchestration.support.tools.read_station_waveform_file` miniSEED reports).
     """
     if not file_reports:
         return {

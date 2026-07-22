@@ -37,10 +37,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 RAPID_ROOT = Path(__file__).resolve().parents[2]
-EQCCTPRO_ROOT = RAPID_ROOT  # eqcctpro package is vendored inside RAPID
-for p in (str(RAPID_ROOT), str(EQCCTPRO_ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(RAPID_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAPID_ROOT))
 
 from rapid.benchmark.fairness import STAGES, build_result, window_starts  # noqa: E402
 
@@ -219,7 +217,7 @@ def run_one_repeat(args) -> int:
     trial_json_path = work_dir / "trial_results.json"
 
     from obspy import UTCDateTime
-    from eqcctpro.tools import materialize_input_into_timechunk_layout
+    from rapid.orchestration.support.tools import materialize_input_into_timechunk_layout
 
     t0 = UTCDateTime(meta["start_time"])
     try:
@@ -227,9 +225,9 @@ def run_one_repeat(args) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] materialize: {exc}")
 
-    from eqcctpro import EvaluateSystem
-    from eqcctpro.tools import ProcessTreeMemorySampler, process_tree_rss_mb
-    import eqcctpro.functionality as _func
+    from rapid.orchestration import EvaluateSystem
+    from rapid.orchestration.support.tools import ProcessTreeMemorySampler, process_tree_rss_mb
+    import rapid.orchestration.runtime.functionality as _func
 
     # Keep picks for scoring (EvaluateSystem would otherwise delete *_outputs).
     _func.remove_output_subdirs = lambda *a, **k: None
@@ -664,7 +662,7 @@ def main() -> int:
     ap.add_argument("--s-threshold", type=float, default=0.3)
     ap.add_argument("--detection-threshold", type=float, default=0.3)
     ap.add_argument("--tag", required=True)
-    ap.add_argument("--net-root", type=Path, default=EQCCTPRO_ROOT / "data" / "seisbench_networks")
+    ap.add_argument("--net-root", type=Path, default=RAPID_ROOT / "data" / "seisbench_networks")
     ap.add_argument("--results-root", type=Path, default=RAPID_ROOT / "results" / "fair_benchmark")
     # Ray temp dir. MUST be short: Ray's AF_UNIX socket paths cap at 107 bytes,
     # and the vendored repo path is long enough that eqcctpro would silently fall

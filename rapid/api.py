@@ -2,7 +2,7 @@
 
 These cover the native baselines used in the fair benchmark: ``annotate``,
 ``classify``, and RAPID Slipstream. For network-scale runs with Model-Actor or
-Ripper, use ``eqcctpro.api.pick`` instead.
+Ripper, use ``rapid.pick`` (or ``rapid.orchestration.pick``).
 """
 
 from __future__ import annotations
