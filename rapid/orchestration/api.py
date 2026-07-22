@@ -14,8 +14,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-from .runtime.functionality import RunEQCCTPro
-
 PathLike = Union[str, Path]
 
 # Friendly names used in the paper and README.
@@ -94,7 +92,7 @@ def pick(
     ascii_station_pick_format: str = "csv",
     overwrite: bool = True,
     **extra: Any,
-) -> RunEQCCTPro:
+) -> Any:
     """Pick P/S arrivals for every station under ``input_dir``.
 
     Parameters
@@ -137,6 +135,14 @@ def pick(
     batch_size
         Lean batch size for Slipstream megabatches.
     """
+    try:
+        from .runtime.functionality import RunEQCCTPro
+    except ImportError as exc:  # pragma: no cover - missing Ray
+        raise ImportError(
+            "Model-Actor and Ripper require Ray. Install the optional "
+            'extra with: pip install "rapid-seis[orchestration]"'
+        ) from exc
+
     strategy = strategy.lower().replace("-", "").replace("_", "")
     if strategy == "modelactor":
         ripper = False
@@ -233,7 +239,7 @@ def model_actor(
     forward: str = "classify",
     dtype: str = "bf16",
     **kwargs: Any,
-) -> RunEQCCTPro:
+) -> Any:
     """Convenience wrapper: ``pick(..., strategy="modelactor")``."""
     return pick(
         input_dir,
@@ -252,7 +258,7 @@ def ripper(
     forward: str = "classify",
     dtype: str = "bf16",
     **kwargs: Any,
-) -> RunEQCCTPro:
+) -> Any:
     """Convenience wrapper: ``pick(..., strategy="ripper")``."""
     return pick(
         input_dir,

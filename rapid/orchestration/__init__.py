@@ -1,16 +1,24 @@
 """Ray orchestration: Model-Actor, Ripper, and Slipstream actors.
 
 This package holds the production picking runtime that began as EQCCTPro and
-now ships as part of RAPID.
+now ships as part of RAPID. Importing the high-level helpers below requires
+the optional ``orchestration`` extra (Ray).
 """
 
 from .api import MODELS, load_network_meta, model_actor, pick, ripper
-from .runtime.functionality import (
-    EvaluateSystem,
-    OptimalCPUConfigurationFinder,
-    OptimalGPUConfigurationFinder,
-    RunEQCCTPro,
-)
+
+try:
+    from .runtime.functionality import (
+        EvaluateSystem,
+        OptimalCPUConfigurationFinder,
+        OptimalGPUConfigurationFinder,
+        RunEQCCTPro,
+    )
+except ImportError:  # pragma: no cover - Ray not installed
+    EvaluateSystem = None  # type: ignore[assignment]
+    OptimalCPUConfigurationFinder = None  # type: ignore[assignment]
+    OptimalGPUConfigurationFinder = None  # type: ignore[assignment]
+    RunEQCCTPro = None  # type: ignore[assignment]
 
 __all__ = [
     "pick",

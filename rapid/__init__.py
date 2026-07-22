@@ -1,7 +1,7 @@
 """RAPID — Resource-Aware Parallel Inference Dispatcher.
 
 Lean inference (Slipstream), fair deployment benchmarks, single-process
-SeisBench helpers, and Ray orchestration (Model-Actor / Ripper).
+SeisBench helpers, and optional Ray orchestration (Model-Actor / Ripper).
 """
 
 from importlib import metadata as _md
@@ -32,9 +32,12 @@ except ImportError:  # pragma: no cover - missing optional Ray stack
     ripper = None  # type: ignore[assignment]
 
 try:
-    __version__ = _md.version("rapid")
+    __version__ = _md.version("rapid-seis")
 except _md.PackageNotFoundError:
-    __version__ = "1.0.0"
+    try:
+        __version__ = _md.version("rapid")
+    except _md.PackageNotFoundError:
+        __version__ = "1.0.0"
 
 __all__ = [
     "annotate",

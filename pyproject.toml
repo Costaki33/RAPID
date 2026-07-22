@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rapid"
-version = "1.0.0"
+name = "rapid-seis"
+version = "1.0.1"
 description = "RAPID: real-time deep-learning seismic phase picking with Slipstream inference and Model-Actor / Ripper orchestration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,9 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
@@ -39,12 +42,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Ray-based orchestration (Model-Actor / Ripper). Install for network-scale picks.
+# Optional: Model-Actor / Ripper (and related EvaluateSystem sweeps) need Ray.
 orchestration = ["ray>=2.40"]
 
 [project.urls]
-Homepage = "https://github.com/ut-beg-texnet/eqcct"
-Repository = "https://github.com/ut-beg-texnet/eqcct"
+Homepage = "https://github.com/Costaki33/RAPID"
+Repository = "https://github.com/Costaki33/RAPID"
+Issues = "https://github.com/Costaki33/RAPID/issues"
 
 [tool.setuptools.packages.find]
 include = ["rapid*"]

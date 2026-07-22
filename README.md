@@ -21,7 +21,7 @@ RAPID was developed to evaluate deployment strategies rather than introduce new 
 
 Accordingly, RAPID provides three complementary capabilities:
 
-- Native single-process SeisBench inference through Annotate, Classify, and Slipstream.
+- Native single-process SeisBench inference through Annotate, Classify, and RAPID's Slipstream.
 - Persistent and ephemeral orchestration strategies, including Model-Actor and Ripper, for evaluating station-level parallelism.
 - A benchmarking framework for comparing inference pipelines, orchestration strategies, hardware configurations, and pick quality under identical workloads.
 
@@ -54,13 +54,18 @@ The orchestration package contains the persistent execution strategies evaluated
 
 ## Installation
 
-RAPID currently requires Python 3.10 or newer and builds directly on SeisBench. Installation is intentionally lightweight so that existing SeisBench workflows can be migrated with minimal modification.
+RAPID currently requires Python 3.10 or newer and builds directly on SeisBench. Installation is intentionally lightweight so that existing SeisBench workflows can be migrated with minimal modification. The import package remains ``rapid``; the PyPI distribution name is ``rapid-seis`` because the name ``rapid`` is already taken.
 
 From PyPI:
 
 ```bash
-pip install rapid
-pip install "rapid[orchestration]"   # Model-Actor / Ripper (requires Ray)
+pip install rapid-seis
+```
+
+This installs single-process Annotate, Classify, Slipstream, and the benchmarking utilities. If you also want the Ray-based orchestration strategies (Model-Actor or Ripper), install the optional extra:
+
+```bash
+pip install "rapid-seis[orchestration]"
 ```
 
 From a clone:
@@ -69,9 +74,10 @@ From a clone:
 conda env create -f environment.yml
 conda activate rapid
 cd RAPID
+pip install -e .
+# optional, only if you need Model-Actor / Ripper:
 pip install -e ".[orchestration]"
 ```
-
 ## Getting started
 
 RAPID can be used as a drop-in replacement for SeisBench inference or as a framework for evaluating deployment strategies. The examples below demonstrate the most common workflows, beginning with the construction of a synthetic station network and continuing through single-process and orchestrated picking.
@@ -101,7 +107,7 @@ The builder writes per-station miniSEED files together with a `manifest.json` co
 
 ### Model-Actor
 
-Model-Actor maintains persistent model instances in memory and is intended for continuously running monitoring systems where repeated model initialization would otherwise dominate runtime. Station streams are distributed across the worker pool, allowing preprocessing, inference, and pick generation to proceed concurrently.
+Model-Actor maintains persistent model instances in memory and is intended for continuously running monitoring systems where repeated model initialization would otherwise dominate runtime. Station streams are distributed across the worker pool, allowing preprocessing, inference, and pick generation to proceed concurrently. This workflow requires the optional orchestration extra (`pip install "rapid-seis[orchestration]"`).
 
 ```python
 from rapid import pick
@@ -139,7 +145,7 @@ pick(..., gpus=[0, 1])    # two GPUs
 
 ### Ripper
 
-Ripper launches short-lived workers for each station task and therefore reloads the model repeatedly during execution. It is included primarily as a baseline for evaluating the cost of ephemeral orchestration relative to persistent Model-Actor execution.
+Ripper launches short-lived workers for each station task and therefore reloads the model repeatedly during execution. It is included primarily as a baseline for evaluating the cost of ephemeral orchestration relative to persistent Model-Actor execution. Like Model-Actor, it requires the optional orchestration extra.
 
 ```python
 pick(
@@ -240,7 +246,22 @@ Increasing the number of host cores available to a one-GPU Model-Actor pool impr
 | EQTransformer | 9.82 | 9.13 | 9.10 | 9.10 | **2.93** |
 | EQT-NC | 5.85 | 4.91 | 4.66 | 4.74 | **2.85** |
 
-Taken together, the CPU and GPU comparisons indicate that the preferred deployment strategy depends on the available hardware. On CPU-only systems, persistent Model-Actor workers provide the most consistent path to real-time processing of large station networks. When a GPU is available, single-process Annotate remains the strongest option among the configurations evaluated here.
+### Memory
+
+Improved warm latency from persistent workers comes with a corresponding increase in host memory. Peak process-tree proportional set size (PSS) was used so that pages shared among Ray workers are counted once, allowing single-process and orchestrated runs to be compared on the same footing. The values below are mean peak PSS in GB for the 580-station STEAD workload on a twenty-core CPU allocation. Cold-start peaks capture the highest footprint while models are being loaded into the pool; warm peaks reflect a kept-alive streaming run after that initialization cost has been paid.
+
+| Method | Workers | Cold-start peak PSS (GB) | Warm streaming peak PSS (GB) |
+| --- | ---: | ---: | ---: |
+| Classify | 1 | 0.7 | — |
+| Annotate | 1 | 1.1 | — |
+| Slipstream | 1 | 1.0 | — |
+| Ripper | 20 | 12.4 | — |
+| Model-Actor[classify] | 20 | 22.7 | 11.7 |
+| Model-Actor[Slipstream-BF16] | 20 | — | 11.5 |
+
+Single-process methods remain near one gigabyte because only one model instance is resident. Model-Actor replicates the model across workers, so the cold peak is substantially higher while the pool is being populated; once the actors remain in service, the warm footprint settles near eleven to twelve gigabytes for a twenty-actor pool. BF16 does not materially reduce CPU host memory relative to Classify inside the same pool, because parameter replicas dominate the footprint; its memory advantage is primarily on GPU VRAM. Ripper avoids retaining a warm pool and is therefore lighter than the cold Model-Actor peak, but it remains far slower and is not a useful trade for continuous monitoring. Memory scales with actor count, which is a further reason to keep approximately one persistent worker per core.
+
+Taken together, the CPU, GPU, and memory comparisons indicate that the preferred deployment strategy depends on the available hardware and the memory budget that can be provisioned. On CPU-only systems, persistent Model-Actor workers provide the most consistent path to real-time processing of large station networks, provided the host can accommodate the replicated model pool. When a GPU is available, single-process Annotate remains the strongest latency option among the configurations evaluated here and does so at a substantially smaller host-memory cost.
 
 ## Reproducing the manuscript benchmarks
 
