@@ -1,11 +1,10 @@
-# RAPID — benchmarking real-time deep-learning seismic phase picking
+# RAPID
 
-RAPID is a benchmarking toolkit built around one practical question: **what is
-the fastest way to run deep-learning phase pickers on real seismic workloads,
-without giving up pick quality?** It measures every stage of the picking
-pipeline — from framework startup to picks landing on disk — across models,
-precisions, batch sizes, CPU/GPU budgets, and deployment strategies, so the
-comparisons are fair and the numbers mean something.
+RAPID (Resource-Aware Parallel Inference Dispatcher) is a toolkit for running
+and benchmarking deep-learning seismic phase pickers on whole station networks.
+It packages lean inference (Slipstream), Ray-based orchestration (Model-Actor
+and Ripper), and a fair deployment benchmark so you can compare strategies on
+the same waveforms and the same pick-quality scores.
 
 ## Background
 
@@ -17,300 +16,189 @@ using persistent Ray model actors. That architecture became the backbone of
 [SCMLPick](https://github.com/ut-beg-texnet/scmlpick), the SeisComP module
 running in production at TexNet today.
 
-RAPID pushes past the persistent-actor approach by combining reduced numerical
-precision (FP16/BF16), `torch.compile`, and aggressive batching. Preliminary
-results show these "lean" inference paths beat SeisBench's own `annotate()` —
-see [RAPID_Seisbench_speedup.pdf](RAPID_Seisbench_speedup.pdf). The fair
-deployment benchmark described below is the publication-grade follow-up.
+RAPID is the next step of that line of work: the same orchestration ideas,
+extended with Slipstream (lean reduced-precision inference) and a fair
+deployment benchmark across models, devices, and scheduling strategies. The
+central finding is that **how you parallelize the work matters more than the
+device alone** — a pool of persistent, single-threaded workers (Model-Actor)
+keeps a many-core CPU busy on heavy models where a single-process picker leaves
+cores idle. Slipstream is a forward path that can run inside that pool; it is
+not a competing orchestrator.
 
-**Models:** PhaseNet, PhaseNetLight (3001-sample window), EQTransformer, and
-EQT-NC (the non-conservative EQTransformer variant). EQCCT is planned once it
-lands in SeisBench.
+EQCCTPro as a standalone package is deprecated in favor of RAPID. Install and
+import RAPID going forward; the orchestration code that began in EQCCTPro now
+ships here (under `eqcctpro/` inside this repo, and via the `rapid` PyPI
+package).
 
-**Inference backends:**
-
-| Backend             | What it is                                                        |
-| ------------------- | ----------------------------------------------------------------- |
-| `baseline_annotate` | Unmodified SeisBench `annotate()` — the reference point.          |
-| `lean_pytorch`      | Our stripped-down path: FP32/FP16/BF16, optional `torch.compile`. |
-| `onnx`              | ONNX Runtime (optional; registered only if the package imports).  |
-| `tensorrt`          | Prebuilt `.plan` engines (optional; same).                        |
+Supported SeisBench models: PhaseNet, PhaseNetLight, EQTransformer, and EQT-NC
+(non-conservative EQTransformer). EQCCT is planned once it lands in SeisBench.
 
 ## What's in the repo
 
 ```
-rapid/                  The benchmarking package
-  backends/             Inference backends (baseline, lean PyTorch, ONNX, TensorRT)
-  runners/              Single-GPU, dual-GPU, and pipelined execution paths
-  benchmark/            Fair-benchmark machinery: stage timing, memory/resource
-                        sampling, pick export, pick-quality scoring
-eqcctpro/               The Ray orchestration framework (Ripper, Model-Actor,
-                        Slipstream) — vendored here; this is its home now
-scripts/                Runnable entry points (benchmarks, sweeps, plots, analysis)
-configs/                JSON configs for the matrix and dtype sweeps
-models_exported/        Where ONNX/TensorRT exports land (kept out of git)
-environment.yml         Full pinned conda environment
-requirements-extra.txt  Optional ONNX/TensorRT dependencies
+eqcctpro/           Orchestration (Model-Actor, Ripper, Slipstream actors)
+rapid/              Lean inference backends and fair-benchmark machinery
+examples/           Build synthetic networks and run a first pick
+benchmarks/
+  fair/             Fair deployment matrix, latency and oversubscription sweeps
+  isolation/        Sequential, contention-free re-measurements
+  analysis/         Summaries, pick-quality scoring, table generators
+configs/            JSON configs for matrix / dtype sweeps
 ```
 
-`results/`, `figures/`, `logs/`, and `data/` (the benchmark networks you build
-locally) are created at runtime and intentionally not committed.
-
-> **Note on eqcctpro:** the standalone
-> [eqcctpro](https://github.com/ut-beg-texnet/eqcct/tree/main/eqcctpro)
-> repository and the `eqcctpro` PyPI package are **deprecated**. The
-> orchestration framework lives in this repository now (`eqcctpro/`) and is
-> developed and versioned here. If you have the old PyPI or editable install
-> in your environment, remove it first: `pip uninstall eqcctpro`.
+Runtime outputs (`results/`, `figures/`, `logs/`, `data/`) are created locally
+and are not part of the published tree.
 
 ## Installation
 
+From PyPI:
+
 ```bash
-# 1. Create the environment (pinned, known-good versions)
+pip install rapid
+pip install "rapid[orchestration]"   # Model-Actor / Ripper (needs Ray)
+```
+
+From a clone:
+
+```bash
 conda env create -f environment.yml
 conda activate rapid
-
-# 2. Install the package (editable) — installs both `rapid` and the
-#    vendored `eqcctpro` orchestration framework
 cd RAPID
-pip install -e .
+pip install -e ".[orchestration]"
 ```
 
-If you'd rather build your own environment, `pip install -e .` pulls in the
-core stack (NumPy, ObsPy, SeisBench, PyTorch, psutil, …). Two optional extras:
+## Quick start: build a network and pick it
+
+Build a synthetic station network from STEAD or TXED — choose how many
+stations, how long each trace is, and where the catalog P and S picks must fall
+so they sit inside your model window.
 
 ```bash
-pip install -e ".[orchestration]"        # Ray, for the orchestration benchmarks
-pip install -r requirements-extra.txt    # ONNX Runtime / TensorRT helpers
+# 50 stations, 3001-sample traces, both P and S inside the window
+python examples/build_seisbench_network.py \
+    --dataset stead --n-stations 50 --require-s \
+    --min-pick-sample 0 --max-pick-sample 2951 \
+    --trim-samples 3001 \
+    --out-root data/seisbench_networks
 ```
 
-Everything is self-contained: the native benchmarks need only the core stack,
-and the orchestration benchmarks (Ripper / Model-Actor / Slipstream) use the
-vendored `eqcctpro/` package plus Ray. No other repository is required.
+Useful knobs:
 
-## Quick start
+| Flag | What it does |
+| --- | --- |
+| `--n-stations` | Network size (traces are tiled if you ask for more than unique catalog events) |
+| `--trim-samples` | Trace length written to disk (e.g. 3001 or 6000) |
+| `--min-pick-sample` / `--max-pick-sample` | Keep catalog P and S inside this sample range |
+| `--dataset stead\|txed` | Source catalog |
+| `--seed` | Reproducible station sampling |
+
+The builder writes per-station miniSEED plus a `manifest.json` with start/end
+times and catalog pick sample indices for quality scoring.
+
+### Orchestrated picking (Model-Actor or Ripper)
+
+```python
+from rapid import pick
+
+# Persistent workers + SeisBench classify (recommended default)
+pick(
+    "data/seisbench_networks/<your_network>",
+    "results/picks_ma_classify",
+    model="EQTransformer",
+    strategy="modelactor",
+    forward="classify",
+    n_workers=20,
+)
+
+# Same pool, Slipstream forward at BF16
+pick(
+    "data/seisbench_networks/<your_network>",
+    "results/picks_ma_slipstream",
+    model="EQTransformer",
+    strategy="modelactor",
+    forward="slipstream",
+    dtype="bf16",
+    n_workers=20,
+)
+
+# Ripper control (fresh task per station; slower cold start)
+pick(..., strategy="ripper", forward="classify", n_workers=20)
+
+# Use GPUs: pass physical device indices
+pick(..., gpus=[0])          # one GPU
+pick(..., gpus=[0, 1])       # two GPUs
+```
+
+Or from the shell:
 
 ```bash
-# Sanity check: one model, one backend, ~a minute on one GPU
-python scripts/run_benchmark.py \
-    --dataset-dir /path/to/data/20241215T120000Z_20241215T120100Z \
-    --model PhaseNet --child original \
-    --backend lean_pytorch --dtype fp16 \
-    --device cuda:0 --n-stations 228 --batch-size 256 --repeats 3
-
-# The fast path: parallel CPU preprocessing feeding megabatched GPU inference
-python scripts/run_pipelined.py \
-    --dataset-dir "$DATA_DIR" --model PhaseNet --child original \
-    --n-stations 580 --batch-size 256 --dtype fp16 \
-    --mode single_gpu --n-cpu-workers 16 --repeats 3
-
-# Full backend matrix + plots
-python scripts/run_matrix.py --config configs/full_matrix.json
-python scripts/make_plots.py --jsonl results/matrix.jsonl --out-dir figures
+python examples/pick_network.py \
+    --input-dir data/seisbench_networks/<your_network> \
+    --strategy modelactor --forward slipstream --dtype bf16 \
+    --n-workers 16
 ```
 
-## The fair deployment benchmark
+`strategy` is how stations are scheduled (`modelactor` or `ripper`).
+`forward` is how each worker computes (`classify` or `slipstream`).
+`dtype` applies to Slipstream (`fp32`, `fp16`, `bf16`). Prefer BF16 for
+EQTransformer; FP16 can overflow its attention padding sentinel.
 
-This is the heart of the repo: one benchmark that puts **every deployment
-strategy on identical footing** — same waveforms, byte-identical model-input
-windows, the same seven timed stages, the same memory metric, and pick quality
-scored against the same catalog ground truth.
+### Single-process baselines (no Ray)
 
-### What gets compared
+```python
+from rapid import annotate, classify, slipstream
 
-**Native family** — the model running directly in one process:
-
-- `annotate` — SeisBench `annotate()` writing probability streams + picks
-- `classify` — SeisBench `classify()` (its internal picker extracts the picks)
-- `slipstream` — our lean path: FP32/FP16/BF16 ± `torch.compile`, batched windows
-
-**Orchestration family** — the same pickers wrapped in eqcctpro's Ray
-deployment strategies, the way they'd actually run in production:
-
-- `ripper` / `ripper_slipstream` — task-per-station queue; each task loads the model
-- `modelactor` / `modelactor_slipstream` — persistent actor pool, models loaded once
-
-Each trial sweeps datasets (STEAD/TXED test networks at 250 and 580 stations),
-CPU budgets (5–20 cores, plus CPU+GPU), window regimes, precisions, and batch
-sizes. Native trials run 5 repeats, each in a fresh subprocess; orchestration
-trials run once per configuration (`--orch-repeats`).
-
-### Matrix size: where the trial counts come from
-
-The base grid is **384 configurations**:
-
-```
-8 model-window-regime combos     PhaseNet x 3 regimes, PhaseNetLight x 3,
-                                 EQTransformer x 1, EQT-NC x 1
-x 2 datasets                     stead, txed
-x 2 station counts               250, 580
-x 12 device points               CPU cores {5,8,11,14,17,20} + the same six
-                                 host-core budgets with a GPU
-= 384
+annotate("data/.../network", "results/ann", model="PhaseNet", device="cpu", batch_size=256)
+classify("data/.../network", "results/cls", model="PhaseNet", device="cpu", torch_threads=1)
+slipstream("data/.../network", "results/ss", model="PhaseNet", dtype="bf16", device="cuda:0")
 ```
 
-Each method multiplies that grid by its own sweep dimensions:
+These are the native paths the fair benchmark compares against Model-Actor.
 
-| Method                | Extra dimensions                                    | Trials |
-| --------------------- | --------------------------------------------------- | -----: |
-| annotate              | 4 batch sizes                                       |  1,536 |
-| classify              | none (fp32, no batching)                            |    384 |
-| slipstream            | precision x batch (PN family 5x4, EQT family 3x4)  |  6,912 |
-| ripper                | none (SeisBench classify, fp32)                     |    384 |
-| modelactor            | none (SeisBench classify, fp32)                     |    384 |
-| ripper_slipstream     | precision x batch, **compile variants excluded**    |  4,224 |
-| modelactor_slipstream | precision x batch (incl. compile)                   |  6,912 |
-| **Total**             |                                                     | **20,736** |
+## Benchmarking your machine
 
-Precisions: fp32 always; PhaseNet/PhaseNetLight add fp16 and bf16 (each with
-and without `torch.compile`); the EQT family adds bf16 only (fp16 overflows
-its attention padding sentinel). `ripper_slipstream` drops the compile
-variants because Ripper re-loads the model inside every station task, so
-compilation would be paid per task — a configuration nobody would deploy.
-Model-Actor keeps them: its persistent actors compile once and amortize.
-
-After the matrix, two follow-on sweeps run automatically: the back-to-back
-**latency sweep** (528 trials) and the **oversubscription sweep** (512 trials,
-concurrency 1–4x the core budget; see `scripts/run_oversub_sweep.sh`).
-
-### What gets measured
-
-- **Seven stages that sum to the total**: `framework_init`, `model_load`,
-  `waveform_access`, `preprocess`, `warmup`, `inference`, `pick_generation`.
-  Orchestration stages are *measured* (per-task busy-time sums plus driver
-  wall segments), never estimated.
-- **Memory**: process-tree RSS *and* PSS (PSS counts Ray's shared pages once,
-  so single-process and actor-pool numbers are actually comparable), plus VRAM
-  for GPU trials.
-- **Resources**: CPU utilization, disk I/O, GPU utilization/power/energy
-  (NVML), and host package energy (RAPL).
-- **Pick quality**: precision/recall/F1 and onset-time residuals vs the
-  catalog, scored for every repeat.
-
-Every trial writes a self-contained `result.json`. Orchestration runs also
-record per-trial `trial_results.json` files with snake_case fields
-(`orchestration_strategy`, `n_modelactors`, `concurrent_tasks`, `batch_size`,
-per-stage busy sums) — the eqcctpro CSVs are legacy plumbing, not the record.
-
-### Running it
+The fair benchmark puts every deployment strategy on the same waveforms, the
+same timed stages, the same memory metric, and the same catalog pick scores.
+You can sweep cores, GPUs, torch threads, batch sizes, and window regimes to
+see how your hardware behaves.
 
 ```bash
-# Build the test networks once (downloads STEAD/TXED via SeisBench)
-python scripts/build_seisbench_network.py --dataset stead --n-stations 580
+# One native trial
+python benchmarks/fair/run_fair_trial.py \
+    --method slipstream --dataset stead --n-stations 250 \
+    --model PhaseNet --device cpu --n-cpus 8 \
+    --dtype bf16 --batch-size 256 --tag smoke
 
-# Launch the whole matrix (resume-safe: re-run the same command after any stop)
-nohup python scripts/run_fair_scheduler.py --total-cpus 120 --num-gpus 2 \
-    >> results/fair_benchmark/scheduler.log 2>&1 &
+# One orchestration trial
+python benchmarks/fair/run_fair_orch_trial.py \
+    --strategy modelactor_slipstream --dataset stead --n-stations 250 \
+    --model PhaseNet --device cpu --n-cpus 8 --dtype bf16 --tag smoke
 
-# Watch progress
-python scripts/fair_progress.py
-tail -f results/fair_benchmark/scheduler.log
+# Full matrix (resume-safe; pin dedicated core blocks per trial)
+python benchmarks/fair/run_fair_scheduler.py --total-cpus 120 --num-gpus 2
+
+# Warm latency and oversubscription sweeps
+bash benchmarks/fair/run_latency_sweep.sh
+bash benchmarks/fair/run_oversub_sweep.sh
+
+# Sequential isolation suite (one trial at a time — trust this for latency)
+bash benchmarks/isolation/run_iso_full.sh
 ```
 
-The scheduler is a core-block FCFS dispatcher: every trial gets a dedicated,
-`taskset`-pinned block of cores (and optionally a GPU), so concurrent trials
-never share hardware. Kill it any time; nothing is lost.
+For longer system sweeps (core budgets, concurrency step sizes, GPU marches),
+`eqcctpro.EvaluateSystem` remains available; the fair runners above are the
+usual entry point for publication-style comparisons.
 
-Two follow-on sweeps reuse the same machinery:
-
-- `scripts/run_latency_sweep.sh` — warm-actor, back-to-back feed latency:
-  cold-start vs warm-feed times for a persistent actor pool.
-- `scripts/run_oversub_sweep.sh` — oversubscription: requesting 1–4× more
-  concurrent actors/tasks than cores, mapping where RAM/VRAM becomes the real
-  constraint (eqcctpro never binds tasks to cores; memory is the true limit).
-
-For unattended multi-day runs, `scripts/benchmark_babysit.sh` (installed as a
-plain cron job) resumes the scheduler if it dies and chains the sweeps when
-the main matrix finishes.
-
-### Running a single trial
-
-Every trial the scheduler launches is also a standalone script, which is handy
-for debugging one configuration:
+Pick-quality scoring against a network manifest:
 
 ```bash
-python scripts/run_fair_trial.py --method slipstream --dataset stead \
-    --n-stations 250 --model PhaseNet --device cpu --n-cpus 5 \
-    --dtype fp16 --batch-size 256 --tag my_test
-
-python scripts/run_fair_orch_trial.py --strategy modelactor_slipstream \
-    --dataset stead --n-stations 250 --model PhaseNet --device cpu \
-    --n-cpus 5 --dtype fp32 --tag my_test
+python benchmarks/fair/compare_orchestrated_picks.py \
+    --manifest data/.../manifest.json --picks-dir results/.../output
 ```
 
-## Pick quality
+More analysis scripts live in `benchmarks/analysis/`.
 
-Pick quality is never an afterthought here — every benchmark trial scores its
-own picks. For standalone analysis:
+## Citation and lineage
 
-```bash
-# Score orchestrated picks against a network's catalog manifest
-python scripts/compare_orchestrated_picks.py \
-    --manifest .../manifest.json --picks-dir .../output
-
-# Dtype matrix with per-trial pick quality vs catalog
-python scripts/run_seisbench_matrix.py --config configs/seisbench_dtype_matrix.json
-
-# Quick FP16-vs-FP32 drift check on any local miniSEED chunk (no catalog needed)
-python scripts/compare_fp16_fp32.py --dataset-dir /path/to/timechunk \
-    --model PhaseNet --child original --device cuda:0 --n-stations 228
-```
-
-`scripts/README_pick_quality.md` documents the aggregation and figure scripts.
-
-## Optional backends: ONNX and TensorRT
-
-```bash
-# Export pretrained weights to ONNX (and optionally TensorRT engines)
-python scripts/export_models.py --onnx-dir models_exported/onnx --skip-trt
-python scripts/export_models.py --onnx-dir models_exported/onnx \
-    --trt-dir models_exported/trt --opt-batch 228 --max-batch 1024
-```
-
-Then point `configs/full_matrix.json` at the exported paths:
-
-```json
-{ "name": "onnx",     "dtype": "fp32", "onnx_path": "models_exported/onnx/PhaseNet_original.onnx" },
-{ "name": "tensorrt", "dtype": "fp16", "engine_path": "models_exported/trt/PhaseNet_original_fp16.plan", "max_batch_size": 1024 }
-```
-
-TensorRT itself comes from NVIDIA for your CUDA version; see the notes at the
-bottom of `requirements-extra.txt`.
-
-## Stage glossary (lean benchmark)
-
-| Stage                  | What happens                                                                 |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `merge_streams`        | (baseline only) concatenating station ObsPy Streams for `model.annotate()`.  |
-| `annotate_end_to_end`  | (baseline only) all of SeisBench's internal pipeline, end to end.             |
-| `preprocess`           | SeisBench's `annotate_stream_pre` (filter, resample), once per station.      |
-| `window_cut_and_stack` | Building one `(N_windows, 3, in_samples)` array across all stations.         |
-| `forward`              | The backend's `infer_chunked` — the model forward pass (CUDA-synchronized).  |
-
-The baseline collapses the lean stages into `annotate_end_to_end`; the lean
-backends expose them separately so you can see *where* the speedup comes from.
-
-## Method families in `matrix.jsonl`
-
-Rows from `scripts/run_matrix.py` / `run_pipelined.py` carry a `kind` +
-`variant` pair so analysis scripts can plot the evolution of speedups side by
-side:
-
-| #   | Kind               | Variant suffix                        | What it is                                                                  |
-| --- | ------------------ | ------------------------------------- | ---------------------------------------------------------------------------- |
-| 1   | `baseline`         | (none)                                | SeisBench `annotate()` on one device.                                       |
-| 2   | `dual_gpu`         | `2gpu_baseline`                       | `annotate()` in parallel on 2 GPUs, stations split 50/50.                   |
-| 3   | `single`           | (none)                                | Lean path, 1 GPU, single-threaded preprocess.                               |
-| 4   | `cpu_worker_sweep` | `cpuN` (device `cuda:0`)              | Lean path, 1 GPU, N CPU preprocess workers feeding one GPU inference actor. |
-| 5   | `dual_gpu_serial`  | `2gpu_serial`                         | Lean path, 2 GPUs, single-threaded preprocess per shard.                    |
-| 6   | `dual_gpu`         | `2gpu_cpuN`                           | Lean path, 2 GPUs, each shard with its own N-worker CPU pool (pipelined).   |
-| 7   | `cpu_worker_sweep` | `cpu_infer_poolN[_tT]` (device `cpu`) | Lean path, CPU inference, N preprocess workers + T BLAS threads.            |
-
-## Older sweeps
-
-Earlier orchestration sweeps (`run_seisbench_sweep.py`, `run_parallel_sweep.py`,
-`run_native_seisbench_sweep.py`, `run_modelactor_slipstream_sweep.py`) predate
-the fair benchmark and remain usable, but the fair benchmark supersedes them
-for any cross-strategy comparison — it is the only path where warmup, stage
-accounting, memory metrics, and pick scoring are guaranteed identical across
-strategies.
+If you use RAPID in published work, please also cite the SeisBench models you
+run and the TexNet / EQCCTPro / SCMLPick lineage described in Background.

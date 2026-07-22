@@ -1,32 +1,42 @@
-# Benchmark outputs (large, machine-specific)
+# ---------------------------------------------------------------------------
+# Production tree: only source, examples, benchmarks, and configs should be
+# committed. Everything below stays local.
+# ---------------------------------------------------------------------------
+
+# Runtime / machine-specific outputs
 results/
 figures/
 logs/
 *.log
 nohup.out
-
-# Benchmark input data (built locally with scripts/build_seisbench_network.py)
 data/
 tmp_ray/
+models_exported/
 
-# Working notes, paper drafts, knowledge-graph exports (not part of the package)
+# Lab notes, drafts, one-off trials, optional backends (not production)
 docs/
-graphify-out/
 attic/
+research/
+graphify-out/
+.claude/
 
-# Exported model artifacts (regenerate with scripts/export_models.py)
-models_exported/*
-!models_exported/.gitkeep
+# Deprecated / experimental packaging extras (kept out of the public repo)
+requirements-extra.txt
+RAPID_Seisbench_speedup.pdf
 
-# Python
+# Python build artifacts
 **/__pycache__/
 *.pyc
 *.egg-info/
+.eggs/
 build/
 dist/
+*.whl
 
-# Editors / OS
+# Editors / OS / local caches
 .DS_Store
 .vscode/
 .idea/
 .dashboard_cache.json
+*.swp
+*~

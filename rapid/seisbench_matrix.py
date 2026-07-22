@@ -42,7 +42,7 @@ empty for a full sweep including FP16 on CPU).
 Rows include **process RAM**, **PyTorch VRAM**, and when NVML is available the
 same ``nvml_*`` fields as :mod:`rapid.matrix`.
 
-Use :func:`run_seisbench_matrix` from ``scripts/run_seisbench_matrix.py``.
+Use :func:`run_seisbench_matrix` from ``benchmarks/fair/run_seisbench_matrix.py``.
 """
 
 from __future__ import annotations
@@ -1038,7 +1038,7 @@ def run_seisbench_matrix(cfg: SeisBenchMatrixConfig) -> None:
                 # ``OMP_NUM_THREADS`` / ``MKL_NUM_THREADS`` at process startup
                 # and cannot be resized per-trial from Python. For BLAS-aware
                 # affinity control launch the matrix via
-                # ``scripts/run_all_affinity.py``, which wraps each affinity
+                # ``attic/scripts/run_all_affinity.py``, which wraps each affinity
                 # value in its own ``taskset`` subprocess with the appropriate
                 # env vars set before Python imports.
                 single_gpu_cpus_sweep: List[Optional[int]] = (

@@ -3,14 +3,28 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rapid-benchmark"
+name = "rapid"
 version = "1.0.0"
-description = "RAPID: real-time deep-learning seismic phase picking — lean inference paths, Ray orchestration (vendored eqcctpro), fair deployment benchmark, pick-quality scoring"
+description = "RAPID: real-time deep-learning seismic phase picking with Slipstream inference and Model-Actor / Ripper orchestration"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Constantinos Skevofilax", email = "cskevofilax@utexas.edu" },
+]
+keywords = [
+    "seismology",
+    "phase-picking",
+    "seisbench",
+    "deep-learning",
+    "ray",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
     "numpy>=1.26",
@@ -25,12 +39,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Ray-based orchestration (Ripper / Model-Actor / Slipstream). The eqcctpro
-# package is vendored in this repo; Ray is its only extra hard dependency.
-# (The legacy EQCCT TensorFlow model path additionally needs tensorflow.)
+# Ray-based orchestration (Model-Actor / Ripper). Install for network-scale picks.
 orchestration = ["ray>=2.40"]
-# ONNX Runtime / TensorRT backends (see requirements-extra.txt for details)
-onnx = ["onnx>=1.15", "onnxruntime-gpu>=1.17"]
+
+[project.urls]
+Homepage = "https://github.com/ut-beg-texnet/eqcct"
+Repository = "https://github.com/ut-beg-texnet/eqcct"
 
 [tool.setuptools.packages.find]
 include = ["rapid*", "eqcctpro*"]
