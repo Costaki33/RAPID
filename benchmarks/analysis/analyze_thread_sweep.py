@@ -104,8 +104,8 @@ def main():
                 continue
             xs = sorted(r)
             ax.plot(xs, [r[x][0] for x in xs], "o-", label=model, color=colors[model])
-        ax.axhline(30, color="k", ls=":", lw=1)
-        ax.text(1, 32, "30 s budget", fontsize=7)
+        ax.axhline(10, color="k", ls=":", lw=1)
+        ax.text(1, 11, "10 s target", fontsize=7)
         ax.set_xscale("log", base=2); ax.set_yscale("log")
         ax.set_xlabel("torch intra-op threads")
         ax.set_title(meth)

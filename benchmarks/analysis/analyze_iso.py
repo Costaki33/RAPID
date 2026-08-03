@@ -3,7 +3,7 @@
 tail latency (p95/p99), from the strictly-sequential isolation run.
 
 For a real-time budget the TAIL matters more than the mean -- a picker that
-averages 2 s but spikes to 8 s on one window in twenty can still miss the 30 s
+averages 2 s but spikes above 10 s on one window in twenty can still miss the 10 s
 deadline for that window. We compute the tail from the per-feed latencies already
 stored in each repeat (7 warm feeds x 10 repeats = 70 per-window samples/cell);
 no re-run needed.

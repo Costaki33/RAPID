@@ -100,8 +100,8 @@ ORCH_SLIPSTREAM_STRATEGIES = {"ripper_slipstream", "modelactor_slipstream"}
 # Dropped 2026-06-17.
 OVERSUB_STRATEGIES = ["modelactor", "modelactor_slipstream"]
 
-# Streaming (warm Model-Actor) strategies: 4 paced feeds, actors stay alive.
-STREAM_STRATEGIES = ["stream_modelactor", "stream_modelactor_slipstream"]
+# Streaming strategies: kept-warm native batched Classify plus persistent actors.
+STREAM_STRATEGIES = ["stream_classify_batched", "stream_modelactor", "stream_modelactor_slipstream"]
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ def _devices(cpu_grid: List[int], sweep_gpu: bool):
 def build_native_trials(args) -> List[Trial]:
     trials: List[Trial] = []
     py = sys.executable
-    runner = str(RAPID_ROOT / "scripts" / "run_fair_trial.py")
+    runner = str(RAPID_ROOT / "benchmarks" / "fair" / "run_fair_trial.py")
     devices = _devices(args.cpu_grid, args.sweep_gpu)
     models = args.models or ALL_MODELS
 
@@ -228,7 +228,7 @@ def build_native_trials(args) -> List[Trial]:
 def build_orch_trials(args) -> List[Trial]:
     """Orchestration trials (Ripper / Model-Actor / MAS) via run_fair_orch_trial.py."""
     trials: List[Trial] = []
-    runner = RAPID_ROOT / "scripts" / "run_fair_orch_trial.py"
+    runner = RAPID_ROOT / "benchmarks" / "fair" / "run_fair_orch_trial.py"
     if not runner.is_file():
         return trials  # wrapper not present yet
     py = sys.executable
@@ -294,11 +294,12 @@ def build_stream_trials(args) -> List[Trial]:
     """Streaming (warm Model-Actor) trials via run_fair_stream_trial.py.
 
     One trial = N paced feeds (default 4 @ 60s) with the actor pool kept alive.
-    ``stream_modelactor`` runs SeisBench classify() in the actors (fp32, no
-    batch); ``stream_modelactor_slipstream`` sweeps precision x batch.
+    ``stream_classify_batched`` keeps one native SeisBench model warm and batches
+    the full network; ``stream_modelactor`` runs classify() in persistent actors;
+    ``stream_modelactor_slipstream`` sweeps precision x batch.
     """
     trials: List[Trial] = []
-    runner = RAPID_ROOT / "scripts" / "run_fair_stream_trial.py"
+    runner = RAPID_ROOT / "benchmarks" / "fair" / "run_fair_stream_trial.py"
     if not runner.is_file():
         return trials
     py = sys.executable
@@ -347,6 +348,8 @@ def build_stream_trials(args) -> List[Trial]:
                                         "--results-root", str(args.results_root),
                                         "--resume",
                                     ]
+                                    if strategy == "stream_classify_batched":
+                                        cmd += ["--torch-threads", "1"]
                                     if comp:
                                         cmd.append("--compile")
                                     trials.append(Trial(
@@ -407,7 +410,7 @@ def build_oversub_trials(args) -> List[Trial]:
     under ``<results-root>/oversub/`` so they never mix with the main matrix.
     """
     trials: List[Trial] = []
-    runner = RAPID_ROOT / "scripts" / "run_fair_orch_trial.py"
+    runner = RAPID_ROOT / "benchmarks" / "fair" / "run_fair_orch_trial.py"
     if not runner.is_file():
         return trials
     py = sys.executable

@@ -30,6 +30,8 @@ Strategies
 * ``stream_modelactor_slipstream`` -- actors run RAPID Slipstream (lean PyTorch)
   with the precision sweep (fp32 / fp16[+compile] / bf16[+compile]) and batch
   size sweep.
+* ``stream_classify_batched``      -- one kept-warm SeisBench model runs
+  ``classify()`` on the full merged network, retaining native pick aggregation.
 
 Stations are distributed round-robin across the actor pool (even split). The
 actor count equals the marching concurrency (= CPU budget by default), each
@@ -73,7 +75,7 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
 )
 
 STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream", "stream_annotate",
-              "stream_modelactor_2gpu")
+              "stream_classify_batched", "stream_modelactor_2gpu")
 MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -143,6 +145,9 @@ def run_one_repeat(args) -> int:
 
     gpu = args.device == "gpu"
     two_gpu = args.strategy == "stream_modelactor_2gpu"
+    ann_mode = args.strategy == "stream_annotate"
+    batched_cls_mode = args.strategy == "stream_classify_batched"
+    native_mode = ann_mode or batched_cls_mode
     core_list = [int(c) for c in str(args.core_list).split(",") if c.strip() != ""] if args.core_list else None
     n_eff = _set_affinity(core_list)
     n_cpus = n_eff if core_list else args.n_cpus
@@ -152,22 +157,22 @@ def run_one_repeat(args) -> int:
     net_dir = _net_dir(args.net_root, args.dataset, args.n_stations, args.net_suffix)
     trace_len = 3001 if args.net_suffix == "_w3001" else 6000
 
-    # Size the driver's own torch pool to the core budget (driver does no heavy
-    # inference, but keep it bounded), THEN force the thread env vars back to 1:
-    # pin_threads() writes OMP/MKL/... = n_cpus into os.environ, and ray.init()
-    # propagates the driver env to the raylet -> every actor. With n_actors ==
-    # n_cpus, inherited n-thread budgets mean n*n OpenMP threads spin-waiting on
-    # n cores (~700x slower inference, see smoke_v3 stream_mas). One compute
-    # thread per actor keeps the pool's total budget == the marching CPUs.
-    pin_threads(n_cpus)
-    for key in (
-        "OMP_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-    ):
-        os.environ[key] = "1"
+    if native_mode:
+        # The kept-warm native paths are one process. Decouple their measured
+        # intra-op optimum from the host CPU allocation.
+        pin_threads(n_cpus, torch_threads=args.torch_threads)
+    else:
+        # Force one compute thread per actor before ray.init() propagates the
+        # environment; otherwise N actors inherit N-thread pools.
+        pin_threads(n_cpus)
+        for key in (
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        ):
+            os.environ[key] = "1"
 
     from rapid.orchestration.support.tools import ProcessTreeMemorySampler, process_tree_rss_mb
 
@@ -201,11 +206,9 @@ def run_one_repeat(args) -> int:
     feeds: List[Dict[str, Any]] = []
     last_picks: Dict[str, Dict[str, List[float]]] = {}
 
-    # Warm-annotate baseline: keep ONE SeisBench model loaded in-process and call
-    # model.annotate() on the whole merged network per feed (no Ray, no actors).
-    # Feed 0 is cold (includes lazy CUDA init); feeds 1..N-1 are warm steady state
-    # -- the fair "warm annotate per window" number to set against warm Model-Actor.
-    ann_mode = args.strategy == "stream_annotate"
+    # Kept-warm native baselines use one in-process SeisBench model and the whole
+    # merged network per feed (no Ray, no actors). Feed 0 captures first-call work;
+    # feeds 1..N-1 are the warm steady-state measurements.
     # two_gpu (set above) spreads the actor pool across BOTH physical GPUs (vs the
     # default single-device pool): with 2 GPUs visible and num_gpus=2.0/N per actor,
     # Ray packs ~N/2 actors onto each device, halving on-device contention.
@@ -213,7 +216,7 @@ def run_one_repeat(args) -> int:
     try:
         with st.stage("framework_init"):
             import torch  # noqa: F401
-            if ann_mode:
+            if native_mode:
                 pass
             else:
                 import ray
@@ -231,7 +234,7 @@ def run_one_repeat(args) -> int:
         amodel = None
         with st.stage("model_load"):
             slip = args.strategy == "stream_modelactor_slipstream"
-            if ann_mode:
+            if native_mode:
                 import seisbench.models as sbm
                 import torch
                 amodel = getattr(sbm, m["parent"]).from_pretrained(m["child"])
@@ -261,7 +264,7 @@ def run_one_repeat(args) -> int:
                     gpus_to_use=([0] if gpu else False),
                     use_gpu=gpu,
                 )
-            if not ann_mode:
+            if not native_mode:
                 actors = []
                 # GPU fraction per actor. 1-GPU: 1.0/N packs all N onto the one
                 # device. 2-GPU: size the fraction so ceil(N/2) actors fit on EACH
@@ -290,6 +293,28 @@ def run_one_repeat(args) -> int:
                 flexible_horizontal_components=True,
                 overlap=int(args.overlap_samples),
             )
+        if batched_cls_mode:
+            cls_kw["batch_size"] = int(args.slipstream_batch_size)
+
+        sta_set = set(stations)
+
+        def station_of(trace_id: str) -> Optional[str]:
+            if not trace_id:
+                return None
+            trace_id = str(trace_id)
+            for token in trace_id.split("."):
+                if token in sta_set:
+                    return token
+            for station in sta_set:
+                if station and station in trace_id:
+                    return station
+            return None
+
+        probes = None
+        if batched_cls_mode:
+            from rapid.orchestration.support.timing_util import SeisBenchStageProbes
+
+            probes = SeisBenchStageProbes(amodel)
 
         n_win_per = len(fairness.window_starts(trace_len, args.in_samples, args.overlap_samples))
         session_t0 = time.monotonic()
@@ -311,24 +336,55 @@ def run_one_repeat(args) -> int:
             streams = load_all_streams(net_dir, stations)
             wf_s = time.perf_counter() - t
 
-            if ann_mode:
-                # Warm batched annotate over the WHOLE merged network (the path a
-                # batch-annotate deployment would call per window, kept warm).
+            if native_mode:
+                # Warm native inference over the WHOLE merged network.
                 from obspy import Stream
                 import torch
                 merged = Stream()
+                orig_starts: Dict[str, Any] = {}
                 for sta, stq in streams:
                     merged += stq
-                ann_kw = dict(batch_size=int(args.slipstream_batch_size),
-                              overlap=int(args.overlap_samples), strict=False,
-                              flexible_horizontal_components=True)
-                t = time.perf_counter()
-                _ = amodel.annotate(merged, **ann_kw)
-                if gpu:
-                    torch.cuda.synchronize()
-                inf_s = time.perf_counter() - t
-                pick_s = 0.0          # picks scored by the native annotate family; timing is the deliverable here
-                feed_picks = {}
+                    if len(stq):
+                        orig_starts[sta] = min(tr.stats.starttime for tr in stq)
+                if ann_mode:
+                    ann_kw = dict(batch_size=int(args.slipstream_batch_size),
+                                  overlap=int(args.overlap_samples), strict=False,
+                                  flexible_horizontal_components=True)
+                    t = time.perf_counter()
+                    _ = amodel.annotate(merged, **ann_kw)
+                    if gpu:
+                        torch.cuda.synchronize()
+                    inf_s = time.perf_counter() - t
+                    pick_s = 0.0
+                    feed_picks = {}
+                else:
+                    assert probes is not None
+                    probes.reset()
+                    t = time.perf_counter()
+                    out = amodel.classify(merged, **cls_kw)
+                    if gpu:
+                        torch.cuda.synchronize()
+                    classify_wall = time.perf_counter() - t
+
+                    t = time.perf_counter()
+                    feed_picks = {sta: {"p": [], "s": []} for sta in stations}
+                    for pick in (getattr(out, "picks", None) or []):
+                        sta = station_of(getattr(pick, "trace_id", "") or "")
+                        start0 = orig_starts.get(sta) if sta is not None else None
+                        pt = (getattr(pick, "peak_time", None)
+                              or getattr(pick, "start_time", None)
+                              or getattr(pick, "time", None))
+                        ph = str(getattr(pick, "phase", "") or "").upper()
+                        if sta is None or start0 is None or pt is None:
+                            continue
+                        sample = float(pt - start0) * 100.0
+                        if ph == "P":
+                            feed_picks[sta]["p"].append(sample)
+                        elif ph == "S":
+                            feed_picks[sta]["s"].append(sample)
+                    mapping_s = time.perf_counter() - t
+                    pick_s = probes.pick_aggregate_s + mapping_s
+                    inf_s = max(0.0, classify_wall - probes.pick_aggregate_s)
             else:
                 t = time.perf_counter()
                 refs = []
@@ -504,11 +560,14 @@ def _worker_argv(args, repeat_index: int) -> List[str]:
     ]
     if args.compile:
         argv.append("--compile")
+    if args.torch_threads is not None:
+        argv += ["--torch-threads", str(args.torch_threads)]
     return argv
 
 
 def run_driver(args) -> int:
     gpu = args.device == "gpu"
+    native_mode = args.strategy in ("stream_annotate", "stream_classify_batched")
     net_dir = _net_dir(args.net_root, args.dataset, args.n_stations, args.net_suffix)
     manifest_path = net_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -517,7 +576,7 @@ def run_driver(args) -> int:
 
     cores = [int(c) for c in str(args.core_list).split(",") if c.strip() != ""]
     n_cpus = len(cores) if cores else args.n_cpus
-    conc = args.concurrency or max(1, min(n_cpus, args.n_stations))
+    conc = 1 if native_mode else (args.concurrency or max(1, min(n_cpus, args.n_stations)))
     out_dir = _out_dir(args)
     rep_dir = out_dir / "repeats"
     result_path = out_dir / "result.json"
@@ -596,6 +655,12 @@ def run_driver(args) -> int:
     m = MODELS[args.model]
     trace_len = 3001 if args.net_suffix == "_w3001" else 6000
     n_win_feed = len(fairness.window_starts(trace_len, args.in_samples, args.overlap_samples)) * args.n_stations
+    if args.strategy == "stream_annotate":
+        output_extractor = "none_probability_traces"
+    elif "slipstream" in args.strategy:
+        output_extractor = "rapid_threshold_crossing"
+    else:
+        output_extractor = "seisbench_classify"
     meta = dict(
         method=args.strategy, family="streaming", dataset=args.dataset.lower(),
         n_stations=args.n_stations, model=args.model, parent=m["parent"], child=m["child"],
@@ -603,12 +668,14 @@ def run_driver(args) -> int:
         in_samples=args.in_samples, overlap_samples=args.overlap_samples,
         net_window=(args.net_suffix or "_w6000").lstrip("_"), window_samples=args.in_samples,
         dtype=args.dtype, compile=args.compile, concurrency=conc,
+        torch_threads=(args.torch_threads if native_mode and args.torch_threads is not None
+                       else (n_cpus if native_mode else 1)),
         batch_size=args.slipstream_batch_size,
         n_feeds=args.n_feeds, feed_interval_s=args.feed_interval_s,
         back_to_back=bool(args.feed_interval_s <= 0),
         n_windows=n_win_feed, n_windows_total=n_win_feed * args.n_feeds,
         repeats=args.repeats, tag=args.tag,
-        pick_extractor=("rapid_threshold_crossing" if "slipstream" in args.strategy else "seisbench_classify"),
+        pick_extractor=output_extractor,
         p_threshold=args.p_threshold, s_threshold=args.s_threshold,
     )
 
@@ -637,6 +704,8 @@ def main() -> int:
     ap.add_argument("--model", required=True, choices=list(MODELS.keys()))
     ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"])
     ap.add_argument("--n-cpus", type=int, default=20)
+    ap.add_argument("--torch-threads", type=int, default=None,
+                    help="Native single-process intra-op threads; defaults to n-cpus")
     ap.add_argument("--gpu-id", type=int, default=0)
     ap.add_argument("--core-list", default="")
     ap.add_argument("--concurrency", type=int, default=0, help="actor count; 0 = n_cpus")
