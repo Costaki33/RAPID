@@ -7,8 +7,9 @@
 # Included (warm streaming only):
 #   1. stream_classify_batched  -- kept-warm Network-Batched Classify (SeisBench picks)
 #   2. stream_annotate         -- kept-warm Annotate probability traces
-#   3. stream_modelactor       -- CPU/GPU persistent Classify actors (fastest RAPID path)
-#   4. stream_modelactor_slipstream bf16 -- secondary RAPID precision path
+#   3. stream_modelactor       -- CPU/GPU persistent per-station Classify actors
+#   4. stream_modelactor_batched -- persistent actors + Network-Batched Classify per share
+#   5. stream_modelactor_slipstream bf16 -- secondary RAPID precision path
 #
 # Host CPU budgets match the paper sweep shape (5/10/15/20) but actor counts are
 # capped for XPS memory/VRAM. See docs/XPS_AI_RUNBOOK.md for core isolation.
@@ -168,6 +169,7 @@ for model in "${MODELS[@]}"; do
     cpu_conc=$ncpus
     if (( cpu_conc > CPU_ACTOR_CAP )); then cpu_conc=$CPU_ACTOR_CAP; fi
     run_one stream_modelactor            cpu "$model" "$ncpus" "$cpu_conc" fp32 ""
+    run_one stream_modelactor_batched    cpu "$model" "$ncpus" "$cpu_conc" fp32 ""
     run_one stream_modelactor_slipstream cpu "$model" "$ncpus" "$cpu_conc" bf16 ""
 
     # Single-GPU counterparts. Actor pool capped by laptop VRAM.
@@ -176,6 +178,7 @@ for model in "${MODELS[@]}"; do
     run_one stream_classify_batched gpu "$model" "$ncpus" 1 fp32 1
     run_one stream_annotate         gpu "$model" "$ncpus" 1 fp32 "$local_ann_thr"
     run_one stream_modelactor       gpu "$model" "$ncpus" "$gpu_conc" fp32 ""
+    run_one stream_modelactor_batched gpu "$model" "$ncpus" "$gpu_conc" fp32 ""
   done
 done
 

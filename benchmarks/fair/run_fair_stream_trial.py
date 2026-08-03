@@ -26,16 +26,21 @@ unified ``warmup`` stage stays 0 here.
 Strategies
 ----------
 * ``stream_modelactor``            -- actors run SeisBench ``model.classify()``
-  end-to-end (same picking path as the cold ``modelactor`` strategy).
+  end-to-end on one station at a time (same picking path as cold ``modelactor``).
+* ``stream_modelactor_batched``    -- same persistent actors, but each actor
+  receives a multi-station merged Stream and runs Network-Batched Classify
+  once per feed (cross-station batching inside each actor).
 * ``stream_modelactor_slipstream`` -- actors run RAPID Slipstream (lean PyTorch)
   with the precision sweep (fp32 / fp16[+compile] / bf16[+compile]) and batch
   size sweep.
 * ``stream_classify_batched``      -- one kept-warm SeisBench model runs
   ``classify()`` on the full merged network, retaining native pick aggregation.
 
-Stations are distributed round-robin across the actor pool (even split). The
-actor count equals the marching concurrency (= CPU budget by default), each
-actor pinned to one logical core's worth of threads.
+Stations are distributed round-robin across the actor pool (even split). For
+``stream_modelactor_batched``, each actor's share is merged into one Stream
+before ``classify()``. The actor count equals the marching concurrency
+(= CPU budget by default), each actor pinned to one logical core's worth of
+threads.
 
 Independent repeats: each repeat is ONE full session (create actors -> N paced
 feeds -> teardown) in a fresh subprocess. Default 3 repeats (sessions are >= 3
@@ -74,8 +79,8 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
     load_manifest_catalog,
 )
 
-STRATEGIES = ("stream_modelactor", "stream_modelactor_slipstream", "stream_annotate",
-              "stream_classify_batched", "stream_modelactor_2gpu")
+STRATEGIES = ("stream_modelactor", "stream_modelactor_batched", "stream_modelactor_slipstream",
+              "stream_annotate", "stream_classify_batched", "stream_modelactor_2gpu")
 MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -147,6 +152,7 @@ def run_one_repeat(args) -> int:
     two_gpu = args.strategy == "stream_modelactor_2gpu"
     ann_mode = args.strategy == "stream_annotate"
     batched_cls_mode = args.strategy == "stream_classify_batched"
+    ma_batched_mode = args.strategy == "stream_modelactor_batched"
     native_mode = ann_mode or batched_cls_mode
     core_list = [int(c) for c in str(args.core_list).split(",") if c.strip() != ""] if args.core_list else None
     n_eff = _set_affinity(core_list)
@@ -293,7 +299,7 @@ def run_one_repeat(args) -> int:
                 flexible_horizontal_components=True,
                 overlap=int(args.overlap_samples),
             )
-        if batched_cls_mode:
+        if batched_cls_mode or ma_batched_mode:
             cls_kw["batch_size"] = int(args.slipstream_batch_size)
 
         sta_set = set(stations)
@@ -389,19 +395,60 @@ def run_one_repeat(args) -> int:
                 t = time.perf_counter()
                 refs = []
                 metas = []
-                for idx, (sta, stq) in enumerate(streams):
-                    actor = actors[idx % n_actors]
-                    refs.append(actor.classify.remote(stq, **cls_kw))
-                    start0 = min(tr.stats.starttime for tr in stq) if len(stq) else None
-                    metas.append((sta, start0))
-                outs = ray.get(refs)
-                inf_s = time.perf_counter() - t
+                if ma_batched_mode:
+                    # Partition stations across actors; each actor runs one
+                    # Network-Batched Classify call on its merged share.
+                    from obspy import Stream
 
-                t = time.perf_counter()
-                feed_picks = {}
-                for (sta, start0), out in zip(metas, outs):
-                    feed_picks[sta] = _picks_from_classify_output(out, start0)
-                pick_s = time.perf_counter() - t
+                    buckets: List[List[Any]] = [[] for _ in range(n_actors)]
+                    for idx, item in enumerate(streams):
+                        buckets[idx % n_actors].append(item)
+                    for actor_idx, bucket in enumerate(buckets):
+                        if not bucket:
+                            continue
+                        merged = Stream()
+                        orig_starts: Dict[str, Any] = {}
+                        for sta, stq in bucket:
+                            merged += stq
+                            if len(stq):
+                                orig_starts[sta] = min(tr.stats.starttime for tr in stq)
+                        refs.append(actors[actor_idx].classify.remote(merged, **cls_kw))
+                        metas.append(orig_starts)
+                    outs = ray.get(refs)
+                    inf_s = time.perf_counter() - t
+
+                    t = time.perf_counter()
+                    feed_picks = {sta: {"p": [], "s": []} for sta in stations}
+                    for orig_starts, out in zip(metas, outs):
+                        for pick in (getattr(out, "picks", None) or []):
+                            sta = station_of(getattr(pick, "trace_id", "") or "")
+                            start0 = orig_starts.get(sta) if sta is not None else None
+                            pt = (getattr(pick, "peak_time", None)
+                                  or getattr(pick, "start_time", None)
+                                  or getattr(pick, "time", None))
+                            ph = str(getattr(pick, "phase", "") or "").upper()
+                            if sta is None or start0 is None or pt is None:
+                                continue
+                            sample = float(pt - start0) * 100.0
+                            if ph == "P":
+                                feed_picks[sta]["p"].append(sample)
+                            elif ph == "S":
+                                feed_picks[sta]["s"].append(sample)
+                    pick_s = time.perf_counter() - t
+                else:
+                    for idx, (sta, stq) in enumerate(streams):
+                        actor = actors[idx % n_actors]
+                        refs.append(actor.classify.remote(stq, **cls_kw))
+                        start0 = min(tr.stats.starttime for tr in stq) if len(stq) else None
+                        metas.append((sta, start0))
+                    outs = ray.get(refs)
+                    inf_s = time.perf_counter() - t
+
+                    t = time.perf_counter()
+                    feed_picks = {}
+                    for (sta, start0), out in zip(metas, outs):
+                        feed_picks[sta] = _picks_from_classify_output(out, start0)
+                    pick_s = time.perf_counter() - t
 
             st.add("waveform_access", wf_s)
             st.add("inference", inf_s)

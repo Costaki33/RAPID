@@ -101,7 +101,8 @@ ORCH_SLIPSTREAM_STRATEGIES = {"ripper_slipstream", "modelactor_slipstream"}
 OVERSUB_STRATEGIES = ["modelactor", "modelactor_slipstream"]
 
 # Streaming strategies: kept-warm native batched Classify plus persistent actors.
-STREAM_STRATEGIES = ["stream_classify_batched", "stream_modelactor", "stream_modelactor_slipstream"]
+STREAM_STRATEGIES = ["stream_classify_batched", "stream_modelactor", "stream_modelactor_batched",
+                     "stream_modelactor_slipstream"]
 
 
 # ---------------------------------------------------------------------------
