@@ -79,8 +79,17 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
     load_manifest_catalog,
 )
 
-STRATEGIES = ("stream_modelactor", "stream_modelactor_batched", "stream_modelactor_slipstream",
-              "stream_annotate", "stream_classify_batched", "stream_modelactor_2gpu")
+STRATEGIES = (
+    "stream_modelactor",
+    "stream_modelactor_batched",
+    "stream_modelactor_annotate_bf16",
+    "stream_modelactor_annotate_fp16",
+    "stream_modelactor_slipstream",
+    "stream_annotate",
+    "stream_classify_batched",
+    "stream_modelactor_2gpu",
+    "stream_modelactor_eqcct",
+)
 MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -239,7 +248,15 @@ def run_one_repeat(args) -> int:
 
         amodel = None
         with st.stage("model_load"):
-            slip = args.strategy == "stream_modelactor_slipstream"
+            slip = args.strategy in (
+                "stream_modelactor_slipstream",
+                "stream_modelactor_annotate_bf16",
+                "stream_modelactor_annotate_fp16",
+            )
+            if args.strategy == "stream_modelactor_annotate_fp16":
+                args.dtype = "fp16"
+            elif args.strategy == "stream_modelactor_annotate_bf16":
+                args.dtype = "bf16"
             if native_mode:
                 import seisbench.models as sbm
                 import torch
@@ -249,17 +266,19 @@ def run_one_repeat(args) -> int:
                     amodel.to(torch.device("cuda:0"))
                 actors = []
             elif slip:
-                from rapid.orchestration.actors.slipstream_actor import SlipstreamSeisBenchModelActor as ActorCls
+                from rapid.orchestration.actors.annotate_precision_actor import (
+                    AnnotatePrecisionModelActor as ActorCls,
+                )
 
                 remote_kwargs = dict(
                     parent_model_name=m["parent"],
                     child_model_name=m["child"],
                     gpus_to_use=([0] if gpu else False),
                     use_gpu=gpu,
-                    slipstream_dtype=args.dtype,
-                    slipstream_compile=args.compile,
+                    annotate_dtype=args.dtype,
+                    annotate_compile=args.compile,
                     overlap_samples=int(args.overlap_samples),
-                    lean_batch_size=int(args.slipstream_batch_size),
+                    annotate_batch_size=int(args.slipstream_batch_size),
                 )
             else:
                 from rapid.orchestration.actors.parallelization import SeisBenchModelActor as ActorCls

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run ONE orchestration fair-benchmark trial -> unified schema-v2 result.json.
 
-Strategies (eqcctpro / Ray): ``ripper`` (Ripper), ``modelactor`` (Model-Actor),
-``modelactor_slipstream`` (Model-Actor + Slipstream FP16/BF16/compile).
+Strategies (eqcctpro / Ray): ``ripper``, ``modelactor``,
+``modelactor_annotate_bf16`` / ``modelactor_annotate_fp16`` (Model-Actor +
+SeisBench Annotate at reduced precision + classify_aggregate), and the
+matching ``ripper_annotate_*`` tags.
 
 Same fairness contract as the native runner (``run_fair_trial.py``)
 ==================================================================
@@ -42,7 +44,17 @@ if str(RAPID_ROOT) not in sys.path:
 
 from rapid.benchmark.fairness import STAGES, build_result, window_starts  # noqa: E402
 
-STRATEGIES = ("ripper", "ripper_slipstream", "modelactor", "modelactor_slipstream")
+STRATEGIES = (
+    "ripper",
+    "ripper_annotate_bf16",
+    "ripper_annotate_fp16",
+    "modelactor",
+    "modelactor_annotate_bf16",
+    "modelactor_annotate_fp16",
+    # Legacy aliases accepted and remapped below
+    "ripper_slipstream",
+    "modelactor_slipstream",
+)
 MODELS = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
@@ -74,14 +86,54 @@ def _self_rss_mb() -> float:
 
 
 def _strategy_flags(strategy: str, dtype: str, compile_model: bool) -> Dict[str, Any]:
-    if strategy == "ripper":
-        return dict(ripper=True, slipstream_inference=False, slipstream_dtype="fp32", slipstream_compile=False)
+    # Remap legacy Slipstream strategy names.
     if strategy == "ripper_slipstream":
-        return dict(ripper=True, slipstream_inference=True, slipstream_dtype=dtype, slipstream_compile=compile_model)
-    if strategy == "modelactor":
-        return dict(ripper=False, slipstream_inference=False, slipstream_dtype="fp32", slipstream_compile=False)
+        strategy = f"ripper_annotate_{dtype}"
     if strategy == "modelactor_slipstream":
-        return dict(ripper=False, slipstream_inference=True, slipstream_dtype=dtype, slipstream_compile=compile_model)
+        strategy = f"modelactor_annotate_{dtype}"
+
+    if strategy == "ripper":
+        return dict(
+            ripper=True,
+            annotate_precision=False,
+            annotate_dtype="fp32",
+            annotate_compile=False,
+            slipstream_inference=False,
+            slipstream_dtype="fp32",
+            slipstream_compile=False,
+        )
+    if strategy.startswith("ripper_annotate_"):
+        d = strategy.split("_")[-1]
+        return dict(
+            ripper=True,
+            annotate_precision=True,
+            annotate_dtype=d,
+            annotate_compile=compile_model,
+            slipstream_inference=True,
+            slipstream_dtype=d,
+            slipstream_compile=compile_model,
+        )
+    if strategy == "modelactor":
+        return dict(
+            ripper=False,
+            annotate_precision=False,
+            annotate_dtype="fp32",
+            annotate_compile=False,
+            slipstream_inference=False,
+            slipstream_dtype="fp32",
+            slipstream_compile=False,
+        )
+    if strategy.startswith("modelactor_annotate_"):
+        d = strategy.split("_")[-1]
+        return dict(
+            ripper=False,
+            annotate_precision=True,
+            annotate_dtype=d,
+            annotate_compile=compile_model,
+            slipstream_inference=True,
+            slipstream_dtype=d,
+            slipstream_compile=compile_model,
+        )
     raise ValueError(strategy)
 
 
@@ -594,7 +646,11 @@ def run_driver(args) -> int:
         # Pick provenance (mirrors the native runner's meta): the classify
         # strategies use SeisBench's internal picker; slipstream strategies use
         # RAPID's threshold-crossing extractor inside the actor/task.
-        pick_extractor=("rapid_threshold_crossing" if "slipstream" in args.strategy else "seisbench_classify"),
+        pick_extractor=(
+            "seisbench_classify_aggregate"
+            if "annotate" in args.strategy
+            else "seisbench_classify"
+        ),
         p_threshold=args.p_threshold, s_threshold=args.s_threshold,
     )
     pq = summarize_pick_quality(pq_repeats) if pq_repeats else None

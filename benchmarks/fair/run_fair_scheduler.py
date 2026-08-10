@@ -11,8 +11,8 @@ without sharing a GPU or host-core budget. CPU trials draw from the remaining
 pool. Slots refill the instant a trial finishes (backfill in submission order).
 
 Each trial is one subprocess:
-* native      -> ``run_fair_trial.py`` (annotate / classify / slipstream)
-* orchestration -> ``run_fair_orch_trial.py`` (Ripper / Model-Actor / MAS)
+* native      -> ``run_fair_trial.py`` (annotate / classify / annotate_bf16 / annotate_fp16)
+* orchestration -> ``run_fair_orch_trial.py`` (Ripper / Model-Actor / annotate-precision)
 
 Both emit the unified schema-v2 ``result.json`` and support ``--resume``; the
 scheduler also pre-skips trials whose result.json is already complete.
@@ -70,39 +70,39 @@ def _window_regimes(model: str):
     ]
 
 
-def _slipstream_specs(model: str):
-    """(dtype, compile, tag-fragment) for each slipstream precision.
+def _annotate_precision_specs(model: str):
+    """(dtype, compile, method/tag-fragment) for reduced-precision Annotate.
 
-    fp32 baseline for ALL models. EQT family: bf16 +/- compile only (fp16 is
-    blocked by the -1e10 pad sentinel). PN/PNL: fp16 and bf16, each +/- compile.
-    cast_weights=True for any reduced precision is enforced inside the backend.
+    EQT family: bf16 only (fp16 blocked by the -1e10 pad sentinel).
+    PN/PNL: fp16 and bf16. Compile variants dropped for the Annotate-precision
+    path (SeisBench annotate + cast); compile remains optional via orch flags.
     """
-    precs = [("fp32", False, "fp32")]
+    precs = [("bf16", False, "annotate_bf16")]
     if model not in EQT_MODELS:
-        precs += [("fp16", False, "fp16"), ("fp16", True, "fp16_compile")]
-    precs += [("bf16", False, "bf16"), ("bf16", True, "bf16_compile")]
+        precs = [("fp16", False, "annotate_fp16")] + precs
     return precs
 
-# Orchestration strategies (eqcctpro). modelactor_slipstream sweeps
-# precision x batch; ripper/modelactor run SeisBench classify() end-to-end at
-# fp32 (no batch dimension). ripper_slipstream was dropped 2026-06-16: Ripper is
-# the non-recommended baseline and its slipstream variant (per-task model reload
-# on the lean path) is the slowest, least-deployable config -- ripper (plain
-# classify) already establishes the Ripper baseline. Kept in
-# ORCH_SLIPSTREAM_STRATEGIES so the `slip` flag still classifies correctly if it
-# ever reappears, but it is no longer built.
-ORCH_STRATEGIES = ["ripper", "modelactor", "modelactor_slipstream"]
-ORCH_SLIPSTREAM_STRATEGIES = {"ripper_slipstream", "modelactor_slipstream"}
-# Oversub sweep maps concurrency vs the memory cap, which is fundamentally about
-# the persistent actor pool -- so it runs the actor strategies only. Ripper
-# (ephemeral task queue, the non-recommended baseline) is excluded: its oversub
-# curve is the least central and by far the slowest (per-task GPU model reload).
-# Dropped 2026-06-17.
-OVERSUB_STRATEGIES = ["modelactor", "modelactor_slipstream"]
+# Orchestration strategies. modelactor_annotate_* runs SeisBench Annotate at
+# reduced precision then classify_aggregate. Legacy modelactor_slipstream is
+# remapped by run_fair_orch_trial.
+ORCH_STRATEGIES = ["ripper", "modelactor", "modelactor_annotate_bf16"]
+ORCH_SLIPSTREAM_STRATEGIES = {
+    "ripper_slipstream",
+    "modelactor_slipstream",
+    "ripper_annotate_bf16",
+    "ripper_annotate_fp16",
+    "modelactor_annotate_bf16",
+    "modelactor_annotate_fp16",
+}
+OVERSUB_STRATEGIES = ["modelactor", "modelactor_annotate_bf16"]
 
 # Streaming strategies: kept-warm native batched Classify plus persistent actors.
-STREAM_STRATEGIES = ["stream_classify_batched", "stream_modelactor", "stream_modelactor_batched",
-                     "stream_modelactor_slipstream"]
+STREAM_STRATEGIES = [
+    "stream_classify_batched",
+    "stream_modelactor",
+    "stream_modelactor_batched",
+    "stream_modelactor_annotate_bf16",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +219,21 @@ def build_native_trials(args) -> List[Trial]:
                                 trials.append(mk("annotate", f"bs{bs}", "fp32", False, bs))
                         if "classify" in args.methods:
                             trials.append(mk("classify", "single", "fp32", False, 1))
-                        if "slipstream" in args.methods:
-                            for dtype, comp, ptag in _slipstream_specs(model):
+                        # Reduced-precision Annotate (replaces Slipstream).
+                        want_prec = (
+                            "annotate_bf16" in args.methods
+                            or "annotate_fp16" in args.methods
+                            or "slipstream" in args.methods
+                        )
+                        if want_prec:
+                            for dtype, comp, method in _annotate_precision_specs(model):
+                                if (
+                                    method not in args.methods
+                                    and "slipstream" not in args.methods
+                                ):
+                                    continue
                                 for bs in args.batch_sizes:
-                                    trials.append(mk("slipstream", f"{ptag}_bs{bs}", dtype, comp, bs))
+                                    trials.append(mk(method, f"bs{bs}", dtype, comp, bs))
     return trials
 
 
@@ -241,7 +252,7 @@ def build_orch_trials(args) -> List[Trial]:
         for wtag, in_samples, overlap, net_suffix in _window_regimes(model):
             for strategy in (args.orch_strategies or ORCH_STRATEGIES):
                 slip = strategy in ORCH_SLIPSTREAM_STRATEGIES
-                precs = _slipstream_specs(model) if slip else [("fp32", False, "fp32")]
+                precs = _annotate_precision_specs(model) if slip else [("fp32", False, "fp32")]
                 # modelactor_slipstream runs bf16 ONLY -- it is the single
                 # recommended config (Model-Actor + Slipstream BF16). The native
                 # `slipstream` family already maps the full precision x compile
@@ -310,10 +321,13 @@ def build_stream_trials(args) -> List[Trial]:
     for model in models:
         for wtag, in_samples, overlap, net_suffix in _window_regimes(model):
             for strategy in (args.stream_strategies or STREAM_STRATEGIES):
-                slip = strategy == "stream_modelactor_slipstream"
-                precs = _slipstream_specs(model) if slip else [("fp32", False, "fp32")]
-                # Warm-latency slipstream: fp32 (warm baseline) + bf16 (recommended)
-                # only -- no fp16/compile (native slipstream already characterizes
+                slip = strategy in (
+                    "stream_modelactor_slipstream",
+                    "stream_modelactor_annotate_bf16",
+                    "stream_modelactor_annotate_fp16",
+                )
+                precs = _annotate_precision_specs(model) if slip else [("fp32", False, "fp32")]
+                # Warm-latency annotate-precision: bf16 (recommended) only.
                 # them; trimmed 2026-06-17 to match the orchestration cut).
                 if slip:
                     precs = [p for p in precs if not p[1] and p[0] != "fp16"]
@@ -390,7 +404,7 @@ def _oversub_precisions(strategy: str, model: str):
     """
     if strategy not in ORCH_SLIPSTREAM_STRATEGIES:
         return [("fp32", "fp32")]
-    return [(dt, pt) for dt, comp, pt in _slipstream_specs(model) if not comp and dt == "bf16"]
+    return [(dt, pt) for dt, comp, pt in _annotate_precision_specs(model) if not comp and dt == "bf16"]
 
 
 def build_oversub_trials(args) -> List[Trial]:
@@ -644,7 +658,7 @@ class Scheduler:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=["native", "orchestration", "streaming", "oversub", "all"], default="all")
-    ap.add_argument("--methods", default="annotate,classify,slipstream",
+    ap.add_argument("--methods", default="annotate,classify,annotate_bf16",
                     help="Native methods to include")
     ap.add_argument("--orch-strategies", default=None, help="Comma list; default all 4")
     ap.add_argument("--stream-strategies", default=None, help="Comma list; default both")

@@ -1,4 +1,4 @@
-"""Ray orchestration: Model-Actor, Ripper, and Slipstream actors.
+"""Ray orchestration: Model-Actor, Ripper, and Annotate-precision actors.
 
 This package holds the production picking runtime that began as EQCCTPro and
 now ships as part of RAPID. Importing the high-level helpers below requires

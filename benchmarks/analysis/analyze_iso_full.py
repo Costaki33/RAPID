@@ -314,13 +314,26 @@ def sec_stream() -> None:
               f"{fmt(warm('stream_modelactor_batched','gpu'))} | "
               f"{fmt(warm('stream_modelactor_batched','gpu', tag=f'iso_gpu_c2_{nst}'))} | "
               f"{fmt(warm('stream_modelactor_2gpu','gpu'))} |")
+        # EQCCT companion (TensorFlow Model-Actor, station-group); 580 only.
+        if nst == 580:
+            def warm_eqcct(device, tag):
+                rows = [r for r in sel(fam="stream", method="stream_modelactor_eqcct",
+                                       model="EQCCT", dataset="stead", nst=580, device=device, ncpus=20)
+                        if r["warm"] is not None and r["tag"] == tag]
+                return rows[0]["warm"] if rows else None
+            w(f"| EQCCT | – | – | – | {fmt(warm_eqcct('cpu','iso_cpu_580'))} | – | "
+              f"– | – | – | {fmt(warm_eqcct('gpu','iso_gpu_580'))} | – | – |")
     have_nbc = any(r["method"] == "stream_classify_batched" and r["warm"] is not None for r in RECS)
     have_ma_nbc = any(r["method"] == "stream_modelactor_batched" and r["warm"] is not None for r in RECS)
+    have_eqcct = any(r["method"] == "stream_modelactor_eqcct" and r["warm"] is not None for r in RECS)
     if have_ma_nbc:
         w("\n*Interpretation:* Model-Actor NBC partitions the network across persistent actors and "
           "runs Network-Batched Classify inside each actor. Compare MA-NBC against per-station "
           "Model-Actor and single-process NBC. MA-NBC GPU c2 uses two actors (larger per-actor "
           "batches) under the same 20-core host allocation.\n")
+        if have_eqcct:
+            w("EQCCT is a TensorFlow companion benchmark using station-group Model-Actors "
+              "(not SeisBench Classify); its MA-NBC column is that EQCCT station-group warm path.\n")
     elif have_nbc:
         w("\n*Interpretation:* warm Network-Batched Classify (NBC) is the output-matched native "
           "discrete-pick baseline. Compare Model-Actor against NBC for like-for-like picks; Annotate "

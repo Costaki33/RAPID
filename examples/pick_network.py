@@ -14,8 +14,8 @@ Then pick it::
         --strategy modelactor --forward classify --n-workers 8
 
     python examples/pick_network.py \\
-        --input-dir ... --strategy modelactor --forward slipstream \\
-        --dtype bf16 --n-workers 8
+        --input-dir ... --strategy modelactor --forward annotate_bf16 \\
+        --n-workers 8
 """
 
 from __future__ import annotations
@@ -37,7 +37,11 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path, default=None)
     ap.add_argument("--model", default="PhaseNet")
     ap.add_argument("--strategy", choices=("modelactor", "ripper"), default="modelactor")
-    ap.add_argument("--forward", choices=("classify", "slipstream"), default="classify")
+    ap.add_argument(
+        "--forward",
+        choices=("classify", "annotate_bf16", "annotate_fp16", "annotate"),
+        default="classify",
+    )
     ap.add_argument("--dtype", choices=("fp32", "fp16", "bf16"), default="bf16")
     ap.add_argument("--n-workers", type=int, default=8)
     ap.add_argument("--gpus", default=None, help="Comma-separated GPU ids, e.g. 0 or 0,1")

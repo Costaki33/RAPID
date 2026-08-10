@@ -44,8 +44,8 @@ Native methods (SeisBench end-to-end vs RAPID Slipstream)
   no built-in cross-station/process parallelism (the deprecated ``parallelism``
   arg routes through synchronous ``annotate``); ``batch_size`` and torch intra-op
   threads are its only throughput levers, both of which we sweep.
-* ``slipstream`` -- RAPID lean PyTorch backend (our custom path) with the
-  precision sweep (fp32 / fp16[+compile] / bf16[+compile]).
+* ``annotate_bf16`` / ``annotate_fp16`` -- SeisBench ``annotate()`` after casting
+  weights to BF16/FP16; discrete picks via SeisBench ``classify_aggregate``.
 
 Three-regime windowing (matches orchestration)
 ----------------------------------------------
@@ -99,7 +99,9 @@ MODELS: Dict[str, Dict[str, str]] = {
     "EQT-NC": {"parent": "EQTransformer", "child": "original_nonconservative"},
 }
 
-NATIVE_METHODS = ("annotate", "classify", "classify_batched", "slipstream")
+NATIVE_METHODS = ("annotate", "classify", "classify_batched", "annotate_bf16", "annotate_fp16")
+# Legacy name kept only so old schedulers fail with a clear message.
+_REMOVED_METHODS = ("slipstream",)
 
 
 # ---------------------------------------------------------------------------
@@ -289,10 +291,20 @@ def _run_annotate_repeat(
     min_separation: int,
     gpu: bool,
     picks_path: Path,
+    dtype: str = "fp32",
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[float]]]]:
-    """SeisBench ``model.annotate()`` end-to-end on the merged network Stream."""
+    """SeisBench ``model.annotate()`` end-to-end on the merged network Stream.
+
+    When ``dtype`` is ``bf16`` or ``fp16``, weights are cast before annotate and
+    discrete picks come from SeisBench ``classify_aggregate`` (Classify family).
+    FP32 annotate keeps RAPID's rising-edge threshold extractor for continuity
+    with the historical Annotate baseline.
+    """
     from obspy import Stream
     from rapid.data import load_all_streams
+
+    dtype = str(dtype).lower()
+    use_classify_aggregate = dtype in ("bf16", "fp16")
 
     st = StageTimes()
     with st.stage("framework_init"):
@@ -303,10 +315,21 @@ def _run_annotate_repeat(
     with st.stage("model_load"):
         import seisbench.models as sbm
 
+        if parent == "EQTransformer" and dtype == "fp16":
+            raise ValueError(
+                "EQTransformer cannot run in fp16 (padding sentinel overflows). Use bf16."
+            )
+
         model = getattr(sbm, parent).from_pretrained(child)
         model.eval()
         if gpu and torch.cuda.is_available():
             model.to(torch.device(device))
+        if use_classify_aggregate:
+            torch_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}[dtype]
+            model.to(torch_dtype)
+            from rapid.api import _wrap_forward_cast
+
+            model = _wrap_forward_cast(model, torch_dtype)
 
     with st.stage("waveform_access"):
         streams = load_all_streams(net_dir, stations)
@@ -349,7 +372,45 @@ def _run_annotate_repeat(
     st.add("inference", max(0.0, annotate_wall - probes.preprocess_s))
 
     with st.stage("pick_generation"):
-        picks = _picks_from_prob_traces(ann, orig_starts, p_threshold, s_threshold, min_separation)
+        if use_classify_aggregate:
+            from rapid.api import classify_from_annotations
+
+            out = classify_from_annotations(
+                model,
+                ann,
+                P_threshold=p_threshold,
+                S_threshold=s_threshold,
+            )
+            sr = 100.0
+            picks: Dict[str, Dict[str, List[float]]] = {
+                sta: {"p": [], "s": []} for sta in stations
+            }
+            for pick in (getattr(out, "picks", None) or []):
+                pt = (
+                    getattr(pick, "peak_time", None)
+                    or getattr(pick, "start_time", None)
+                    or getattr(pick, "time", None)
+                )
+                ph = str(getattr(pick, "phase", "") or "").upper()
+                # Trace station is on the pick when available.
+                sta = str(getattr(pick, "trace_id", "") or "")
+                # Pick.trace_id is often NET.STA.LOC.CHA — take station code.
+                if "." in sta:
+                    parts = sta.split(".")
+                    sta = parts[1] if len(parts) > 1 else parts[0]
+                if not sta or sta not in orig_starts or pt is None:
+                    # Fall back: match against orig_starts by scanning? skip unknown
+                    continue
+                start0 = orig_starts[sta]
+                samp = float(pt - start0) * sr
+                if ph == "P":
+                    picks.setdefault(sta, {"p": [], "s": []})["p"].append(samp)
+                elif ph == "S":
+                    picks.setdefault(sta, {"p": [], "s": []})["s"].append(samp)
+        else:
+            picks = _picks_from_prob_traces(
+                ann, orig_starts, p_threshold, s_threshold, min_separation
+            )
         # Persist picks INSIDE the timed stage (matches orchestration's
         # pick-write timing, which includes its disk write).
         picks_path.write_text(json.dumps(picks))
@@ -359,6 +420,10 @@ def _run_annotate_repeat(
         "n_windows": n_per * len(stations), "batch_size": int(batch_size),
         "windows_per_station": float(n_per), "seisbench_native": True,
         "preprocess_measured_via_hooks": True,
+        "dtype": dtype,
+        "pick_extractor": (
+            "seisbench_classify_aggregate" if use_classify_aggregate else "rapid_threshold_crossing"
+        ),
     })
     return repeat, picks
 
@@ -679,7 +744,17 @@ def run_one_repeat(args) -> int:
                 overlap_samples=args.overlap_samples, trace_len=trace_len,
                 batch_size=args.batch_size, p_threshold=args.p_threshold,
                 s_threshold=args.s_threshold, min_separation=args.min_separation, gpu=gpu,
-                picks_path=picks_path,
+                picks_path=picks_path, dtype="fp32",
+            )
+        elif args.method in ("annotate_bf16", "annotate_fp16"):
+            dtype = "bf16" if args.method == "annotate_bf16" else "fp16"
+            repeat, picks = _run_annotate_repeat(
+                net_dir=net_dir, stations=stations, parent=parent, child=child,
+                device=device, n_cpus=n_eff, torch_threads=args.torch_threads, in_samples=args.in_samples,
+                overlap_samples=args.overlap_samples, trace_len=trace_len,
+                batch_size=args.batch_size, p_threshold=args.p_threshold,
+                s_threshold=args.s_threshold, min_separation=args.min_separation, gpu=gpu,
+                picks_path=picks_path, dtype=dtype,
             )
         elif args.method == "classify_batched":
             repeat, picks = _run_classify_batched_repeat(
@@ -691,13 +766,9 @@ def run_one_repeat(args) -> int:
                 picks_path=picks_path,
             )
         else:
-            repeat, picks = _run_batched_repeat(
-                net_dir=net_dir, stations=stations, parent=parent, child=child,
-                device=device, n_cpus=n_eff, torch_threads=args.torch_threads, in_samples=args.in_samples,
-                overlap_samples=args.overlap_samples, dtype=args.dtype,
-                compile_model=args.compile, batch_size=args.batch_size,
-                p_threshold=args.p_threshold, s_threshold=args.s_threshold,
-                min_separation=args.min_separation, gpu=gpu, picks_path=picks_path,
+            raise ValueError(
+                f"Unknown method {args.method!r}. slipstream was removed; "
+                "use annotate_bf16 / annotate_fp16."
             )
     except Exception as exc:  # noqa: BLE001
         import traceback
@@ -853,10 +924,17 @@ def run_driver(args) -> int:
         window_samples=args.in_samples, dtype=args.dtype, compile=args.compile,
         batch_size=args.batch_size, n_windows=n_windows, n_stations_windows=args.n_stations,
         repeats=args.repeats, tag=args.tag,
-        # Pick provenance: classify uses SeisBench's internal picker; annotate +
-        # slipstream use RAPID's threshold-crossing extractor. Recorded so
-        # quality comparisons across methods carry the extractor caveat.
-        pick_extractor=("seisbench_classify" if args.method in ("classify", "classify_batched") else "rapid_threshold_crossing"),
+        # Pick provenance: classify* and annotate_bf16/fp16 use SeisBench
+        # classify_aggregate; FP32 annotate uses RAPID's rising-edge extractor.
+        pick_extractor=(
+            "seisbench_classify"
+            if args.method in ("classify", "classify_batched")
+            else (
+                "seisbench_classify_aggregate"
+                if args.method in ("annotate_bf16", "annotate_fp16")
+                else "rapid_threshold_crossing"
+            )
+        ),
         min_separation=args.min_separation,
         p_threshold=args.p_threshold, s_threshold=args.s_threshold,
     )

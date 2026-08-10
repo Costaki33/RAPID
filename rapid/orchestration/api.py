@@ -2,9 +2,9 @@
 
 Use this module when you want to pick a station network without wiring up
 ``RunEQCCTPro`` by hand. Choose an orchestration strategy (Model-Actor or
-Ripper) and a forward path (SeisBench classify, or Slipstream at a chosen
-precision). For single-process SeisBench ``annotate`` / ``classify`` without
-Ray, see ``rapid.api``.
+Ripper) and a forward path (SeisBench classify, or Annotate at FP16/BF16).
+For single-process SeisBench ``annotate`` / ``classify`` without Ray, see
+``rapid.api``.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ MODELS: Dict[str, Dict[str, str]] = {
 }
 
 STRATEGIES = ("modelactor", "ripper")
-FORWARDS = ("classify", "slipstream")
+FORWARDS = ("classify", "annotate_bf16", "annotate_fp16", "annotate")
 DTYPES = ("fp32", "fp16", "bf16")
 
 
@@ -64,6 +64,42 @@ def _default_cpu_ids(n: Optional[int]) -> List[int]:
     if n is None:
         n = max(1, (os.cpu_count() or 1))
     return list(range(int(n)))
+
+
+def _resolve_forward(forward: str, dtype: str) -> tuple[str, str, bool]:
+    """Return (forward_name, dtype, annotate_precision)."""
+    forward = forward.lower().replace("-", "_")
+    # Legacy Slipstream name
+    if forward == "slipstream":
+        raise ValueError(
+            "forward='slipstream' was removed. Use forward='annotate_bf16' "
+            "or forward='annotate_fp16' (or forward='annotate' with dtype=...)."
+        )
+    if forward not in FORWARDS:
+        raise ValueError(
+            f"forward must be one of {FORWARDS}, got {forward!r}. "
+            "For single-process SeisBench annotate/classify without Ray, "
+            "use rapid.api.annotate / rapid.api.classify."
+        )
+    dtype = dtype.lower()
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, got {dtype!r}")
+
+    if forward == "annotate_bf16":
+        return forward, "bf16", True
+    if forward == "annotate_fp16":
+        return forward, "fp16", True
+    if forward == "annotate":
+        if dtype == "fp32":
+            raise ValueError(
+                "forward='annotate' on Model-Actor/Ripper requires dtype "
+                "'bf16' or 'fp16'. For FP32 Annotate without Ray use "
+                "rapid.api.annotate. For FP32 Classify workers use "
+                "forward='classify'."
+            )
+        return f"annotate_{dtype}", dtype, True
+    # classify
+    return forward, "fp32", False
 
 
 def pick(
@@ -110,13 +146,13 @@ def pick(
         ``ripper`` starts a fresh worker task per station (slower cold start;
         useful as a control).
     forward
-        ``classify`` uses SeisBench ``classify()`` inside each worker.
-        ``slipstream`` uses RAPID's lean reduced-precision forward. Pick
-        ``dtype`` when using Slipstream (``fp32``, ``fp16``, or ``bf16``).
+        ``classify`` uses SeisBench ``classify()`` inside each worker (FP32).
+        ``annotate_bf16`` / ``annotate_fp16`` run SeisBench Annotate after
+        casting weights, then ``classify_aggregate`` for discrete picks.
     dtype
-        Numerical precision for Slipstream. Ignored for ``forward="classify"``
-        (SeisBench classify stays FP32). Prefer ``bf16`` for EQTransformer;
-        FP16 can overflow its attention padding sentinel.
+        Numerical precision when ``forward`` is ``annotate`` (must be bf16 or
+        fp16). Ignored for ``forward="classify"``. Prefer ``bf16`` for
+        EQTransformer; FP16 can overflow its attention padding sentinel.
     n_workers
         How many concurrent station workers to run. Defaults to the number of
         CPUs in ``cpu_ids``.
@@ -131,9 +167,9 @@ def pick(
         exists, values are taken from the synthetic-network manifest.
         ``timechunk_dt`` is in minutes (EQCCTPro convention).
     overlap_samples
-        Window overlap in samples for SeisBench / Slipstream windowing.
+        Window overlap in samples for SeisBench Annotate/Classify windowing.
     batch_size
-        Lean batch size for Slipstream megabatches.
+        SeisBench Annotate ``batch_size`` for reduced-precision workers.
     """
     try:
         from .runtime.functionality import RunEQCCTPro
@@ -151,17 +187,7 @@ def pick(
     else:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
 
-    forward = forward.lower()
-    if forward not in FORWARDS:
-        raise ValueError(
-            f"forward must be one of {FORWARDS}, got {forward!r}. "
-            "For single-process SeisBench annotate/classify without Ray, "
-            "use rapid.api.annotate / rapid.api.classify."
-        )
-
-    dtype = dtype.lower()
-    if dtype not in DTYPES:
-        raise ValueError(f"dtype must be one of {DTYPES}, got {dtype!r}")
+    forward, dtype, annotate_precision = _resolve_forward(forward, dtype)
 
     m = _resolve_model(model)
     input_dir = Path(input_dir)
@@ -191,7 +217,6 @@ def pick(
     use_gpu = gpus is not None and len(list(gpus)) > 0
     selected_gpus = list(gpus) if use_gpu else None
 
-    slipstream = forward == "slipstream"
     log_path = Path(log_filepath) if log_filepath else output_dir / "eqcctpro.log"
 
     runner = RunEQCCTPro(
@@ -217,9 +242,15 @@ def pick(
         seisbench_child_model=m["child"],
         Detection_threshold=detection_threshold,
         ripper=ripper,
-        slipstream_inference=slipstream,
-        slipstream_dtype=dtype if slipstream else "fp32",
-        slipstream_compile=bool(compile_model) if slipstream else False,
+        annotate_precision=annotate_precision,
+        annotate_dtype=dtype if annotate_precision else "fp32",
+        annotate_compile=bool(compile_model) if annotate_precision else False,
+        annotate_overlap_samples=int(overlap_samples),
+        annotate_batch_size=int(batch_size),
+        # Legacy kwargs still accepted by RunEQCCTPro for older callers.
+        slipstream_inference=annotate_precision,
+        slipstream_dtype=dtype if annotate_precision else "fp32",
+        slipstream_compile=bool(compile_model) if annotate_precision else False,
         slipstream_overlap_samples=int(overlap_samples),
         slipstream_batch_size=int(batch_size),
         seisbench_overlap_samples=int(overlap_samples),

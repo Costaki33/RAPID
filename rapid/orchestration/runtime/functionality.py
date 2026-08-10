@@ -65,6 +65,14 @@ class RunEQCCTPro():
                 ripper: bool = False,  # If True, use task-based parallel_predict instead of ModelActor pool
                 ripper_ignore_cpu_ram_cap: bool = False,  # CPU Ripper: skip RAM-based max_pending_tasks clamp
                 ignore_cpu_ram_cap: bool = False,  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
+                # Reduced-precision Annotate (replaces Slipstream). Prefer annotate_*.
+                annotate_precision: bool = False,
+                annotate_dtype: str = 'bf16',
+                annotate_compile: bool = False,
+                annotate_overlap_samples: int = 0,
+                annotate_batch_size: int = 256,
+                annotate_cap_tasks_to_cpus: bool = True,
+                # Legacy Slipstream aliases (mapped onto annotate_* below).
                 slipstream_inference: bool = False,
                 slipstream_dtype: str = 'bf16',
                 slipstream_compile: bool = False,
@@ -138,14 +146,36 @@ class RunEQCCTPro():
         self.ripper = ripper
         self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
         self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
-        self.slipstream_inference = slipstream_inference
-        self.slipstream_dtype = slipstream_dtype
-        self.slipstream_compile = slipstream_compile
-        self.slipstream_overlap_samples = slipstream_overlap_samples
-        self.slipstream_batch_size = slipstream_batch_size
-        # False = allow more in-flight slipstream CPU tasks than cores
-        # (oversubscription studies; RAM/VRAM caps still apply).
-        self.slipstream_cap_tasks_to_cpus = slipstream_cap_tasks_to_cpus
+        # Prefer annotate_*; fall back to legacy slipstream_* kwargs.
+        self.annotate_precision = bool(annotate_precision or slipstream_inference)
+        self.annotate_dtype = str(
+            annotate_dtype if (annotate_precision or not slipstream_inference) else slipstream_dtype
+        )
+        if annotate_precision:
+            self.annotate_dtype = str(annotate_dtype)
+            self.annotate_compile = bool(annotate_compile)
+            self.annotate_overlap_samples = int(annotate_overlap_samples)
+            self.annotate_batch_size = int(annotate_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(annotate_cap_tasks_to_cpus)
+        elif slipstream_inference:
+            self.annotate_dtype = str(slipstream_dtype)
+            self.annotate_compile = bool(slipstream_compile)
+            self.annotate_overlap_samples = int(slipstream_overlap_samples)
+            self.annotate_batch_size = int(slipstream_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(slipstream_cap_tasks_to_cpus)
+        else:
+            self.annotate_dtype = str(annotate_dtype)
+            self.annotate_compile = bool(annotate_compile)
+            self.annotate_overlap_samples = int(annotate_overlap_samples)
+            self.annotate_batch_size = int(annotate_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(annotate_cap_tasks_to_cpus)
+        # Keep slipstream_* attributes as aliases so mseed_predictor callers still work.
+        self.slipstream_inference = self.annotate_precision
+        self.slipstream_dtype = self.annotate_dtype
+        self.slipstream_compile = self.annotate_compile
+        self.slipstream_overlap_samples = self.annotate_overlap_samples
+        self.slipstream_batch_size = self.annotate_batch_size
+        self.slipstream_cap_tasks_to_cpus = self.annotate_cap_tasks_to_cpus
         self.seisbench_overlap_samples = seisbench_overlap_samples
 
         # Validate model type and parameters
@@ -160,10 +190,10 @@ class RunEQCCTPro():
         elif self.model_type == 'seisbench':
             if seisbench_parent_model is None or seisbench_child_model is None:
                 raise ValueError("For SeisBench model_type, seisbench_parent_model and seisbench_child_model are required")
-        if slipstream_inference and self.model_type != 'seisbench':
-            raise ValueError("slipstream_inference is only supported for model_type='seisbench'")
-        if slipstream_inference and slipstream_compile and use_gpu and selected_gpus and len(selected_gpus) > 1:
-            raise ValueError("slipstream_compile is only supported with a single GPU")
+        if self.annotate_precision and self.model_type != 'seisbench':
+            raise ValueError("annotate_precision is only supported for model_type='seisbench'")
+        if self.annotate_precision and self.annotate_compile and use_gpu and selected_gpus and len(selected_gpus) > 1:
+            raise ValueError("annotate_compile is only supported with a single GPU")
         if self.model_type == 'seisbench' and number_of_concurrent_station_predictions is None:
             raise ValueError("number_of_concurrent_station_predictions is required for SeisBench")
 
@@ -652,6 +682,12 @@ class EvaluateSystem():
                  ripper: bool = False,
                  ripper_ignore_cpu_ram_cap: bool = False,
                  ignore_cpu_ram_cap: bool = False,
+                 annotate_precision: bool = False,
+                 annotate_dtype: str = 'bf16',
+                 annotate_compile: bool = False,
+                 annotate_overlap_samples: int = 0,
+                 annotate_batch_size: int = 256,
+                 annotate_cap_tasks_to_cpus: bool = True,
                  slipstream_inference: bool = False,
                  slipstream_dtype: str = 'bf16',
                  slipstream_compile: bool = False,
@@ -758,14 +794,31 @@ class EvaluateSystem():
         self.ripper = ripper
         self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
         self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
-        self.slipstream_inference = slipstream_inference
-        self.slipstream_dtype = slipstream_dtype
-        self.slipstream_compile = slipstream_compile
-        self.slipstream_overlap_samples = slipstream_overlap_samples
-        self.slipstream_batch_size = slipstream_batch_size
-        # False = allow more in-flight slipstream CPU tasks than cores
-        # (oversubscription studies; RAM/VRAM caps still apply).
-        self.slipstream_cap_tasks_to_cpus = slipstream_cap_tasks_to_cpus
+        self.annotate_precision = bool(annotate_precision or slipstream_inference)
+        if annotate_precision:
+            self.annotate_dtype = str(annotate_dtype)
+            self.annotate_compile = bool(annotate_compile)
+            self.annotate_overlap_samples = int(annotate_overlap_samples)
+            self.annotate_batch_size = int(annotate_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(annotate_cap_tasks_to_cpus)
+        elif slipstream_inference:
+            self.annotate_dtype = str(slipstream_dtype)
+            self.annotate_compile = bool(slipstream_compile)
+            self.annotate_overlap_samples = int(slipstream_overlap_samples)
+            self.annotate_batch_size = int(slipstream_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(slipstream_cap_tasks_to_cpus)
+        else:
+            self.annotate_dtype = str(annotate_dtype)
+            self.annotate_compile = bool(annotate_compile)
+            self.annotate_overlap_samples = int(annotate_overlap_samples)
+            self.annotate_batch_size = int(annotate_batch_size)
+            self.annotate_cap_tasks_to_cpus = bool(annotate_cap_tasks_to_cpus)
+        self.slipstream_inference = self.annotate_precision
+        self.slipstream_dtype = self.annotate_dtype
+        self.slipstream_compile = self.annotate_compile
+        self.slipstream_overlap_samples = self.annotate_overlap_samples
+        self.slipstream_batch_size = self.annotate_batch_size
+        self.slipstream_cap_tasks_to_cpus = self.annotate_cap_tasks_to_cpus
         self.seisbench_overlap_samples = seisbench_overlap_samples
 
         self.waveform_filter_type = waveform_filter_type
@@ -787,10 +840,10 @@ class EvaluateSystem():
         elif self.model_type == 'seisbench':
             if seisbench_parent_model is None or seisbench_child_model is None:
                 raise ValueError("For SeisBench model_type, seisbench_parent_model and seisbench_child_model are required")
-        if slipstream_inference and self.model_type != 'seisbench':
-            raise ValueError("slipstream_inference is only supported for model_type='seisbench'")
-        if slipstream_inference and slipstream_compile and self.use_gpu and selected_gpus and len(selected_gpus) > 1:
-            raise ValueError("slipstream_compile is only supported with a single GPU")
+        if self.annotate_precision and self.model_type != 'seisbench':
+            raise ValueError("annotate_precision is only supported for model_type='seisbench'")
+        if self.annotate_precision and self.annotate_compile and self.use_gpu and selected_gpus and len(selected_gpus) > 1:
+            raise ValueError("annotate_compile is only supported with a single GPU")
         
         # Ensures that the output_dir exists. If it doesn't, we create it 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -1396,7 +1449,7 @@ class EvaluateSystem():
                                     extra={
                                         "orchestration_strategy": (
                                             ("ripper" if self.ripper else "modelactor")
-                                            + ("_slipstream" if self.slipstream_inference else "")
+                                            + (f"_annotate_{self.slipstream_dtype}" if self.slipstream_inference else "")
                                         ),
                                         "use_gpu": False,
                                     },
@@ -2086,7 +2139,7 @@ class EvaluateSystem():
                                 extra={
                                     "orchestration_strategy": (
                                         ("ripper" if self.ripper else "modelactor")
-                                        + ("_slipstream" if self.slipstream_inference else "")
+                                        + (f"_annotate_{self.slipstream_dtype}" if self.slipstream_inference else "")
                                     ),
                                     "use_gpu": True,
                                 },

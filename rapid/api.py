@@ -1,17 +1,16 @@
 """Single-process SeisBench picking helpers (no Ray).
 
 These cover the native baselines used in the fair benchmark: ``annotate``,
-``classify``, and RAPID Slipstream. For network-scale runs with Model-Actor or
-Ripper, use ``rapid.pick`` (or ``rapid.orchestration.pick``).
+``classify``, and reduced-precision Annotate (``annotate_bf16`` /
+``annotate_fp16``). For network-scale runs with Model-Actor or Ripper, use
+``rapid.pick`` (or ``rapid.orchestration.pick``).
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
-import numpy as np
 from obspy import Stream, read
 
 PathLike = Union[str, Path]
@@ -21,6 +20,20 @@ MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
     "EQTransformer": {"parent": "EQTransformer", "child": "original"},
     "EQT-NC": {"parent": "EQTransformer", "child": "nonconservative"},
+}
+
+DTYPES = ("fp32", "fp16", "bf16")
+
+EQT_FP16_MESSAGE = (
+    "EQTransformer cannot run in fp16: it hard-codes -1e10 as a "
+    "pooling pad sentinel, which overflows fp16. Use dtype='bf16' "
+    "(same 16-bit storage, full fp32 exponent range) or dtype='fp32'."
+)
+
+_DTYPE_MAP = {
+    "fp32": "float32",
+    "fp16": "float16",
+    "bf16": "bfloat16",
 }
 
 
@@ -36,20 +49,74 @@ def _resolve_model(model: str) -> Dict[str, str]:
     )
 
 
-def _load_seisbench_model(model: str, device: str):
+def _normalize_dtype(dtype: str) -> str:
+    d = str(dtype).lower().strip()
+    if d not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, got {dtype!r}")
+    return d
+
+
+def _wrap_forward_cast(model, torch_dtype):
+    """Make SeisBench annotate's FP32 buffers compatible with cast weights.
+
+    ``model.annotate()`` builds float32 tensors internally. After
+    ``model.to(bf16/fp16)``, the first conv would otherwise fail with
+    ``expected scalar type Float but found BFloat16``. Casting inputs in
+    ``forward`` (and returning float32 outputs) keeps Annotate's pipeline
+    intact while running the network at the requested precision.
+    """
+    import torch
+
+    if getattr(model, "_rapid_dtype_wrapped", False):
+        return model
+
+    orig_forward = model.forward
+
+    def forward(x, *args, **kwargs):
+        if torch.is_tensor(x) and x.dtype != torch_dtype:
+            x = x.to(dtype=torch_dtype)
+        out = orig_forward(x, *args, **kwargs)
+        if torch.is_tensor(out):
+            return out.float()
+        if isinstance(out, (tuple, list)):
+            casted = []
+            for o in out:
+                casted.append(o.float() if torch.is_tensor(o) else o)
+            return type(out)(casted)
+        return out
+
+    model.forward = forward  # type: ignore[method-assign]
+    model._rapid_dtype_wrapped = True
+    return model
+
+
+def _load_seisbench_model(model: str, device: str, dtype: str = "fp32"):
+    """Load a pretrained SeisBench model and optionally cast weights."""
     import seisbench.models as sbm
     import torch
 
+    dtype = _normalize_dtype(dtype)
     m = _resolve_model(model)
+    if m["parent"] == "EQTransformer" and dtype == "fp16":
+        raise ValueError(EQT_FP16_MESSAGE)
+
     cls = getattr(sbm, m["parent"])
     sb_model = cls.from_pretrained(m["child"])
     sb_model.eval()
+
     if device.startswith("cuda") and torch.cuda.is_available():
-        sb_model.to(torch.device(device))
+        torch_device = torch.device(device)
     else:
-        sb_model.to(torch.device("cpu"))
+        torch_device = torch.device("cpu")
         device = "cpu"
-    return sb_model, device
+
+    sb_model.to(torch_device)
+    if dtype in ("fp16", "bf16"):
+        torch_dtype = getattr(torch, _DTYPE_MAP[dtype])
+        sb_model.to(torch_dtype)
+        sb_model = _wrap_forward_cast(sb_model, torch_dtype)
+
+    return sb_model, device, dtype
 
 
 def _station_dirs(input_dir: Path) -> List[Path]:
@@ -101,6 +168,7 @@ def annotate(
     *,
     model: str = "PhaseNet",
     device: str = "cpu",
+    dtype: str = "fp32",
     batch_size: int = 256,
     n_stations: Optional[int] = None,
     torch_threads: int = 1,
@@ -108,21 +176,65 @@ def annotate(
 ) -> Stream:
     """Run SeisBench ``model.annotate()`` on the merged network stream.
 
-    Returns the probability streams SeisBench produces. This is the native
-    single-process batched path — not Ray Model-Actor.
+    ``dtype`` selects numerical precision for the forward pass:
+
+    * ``fp32`` — native SeisBench weights (default)
+    * ``bf16`` — cast weights to bfloat16 before annotate
+    * ``fp16`` — cast weights to float16 before annotate (not valid for EQTransformer)
+
+    Returns the same ObsPy probability streams SeisBench Annotate produces.
+    Pass those streams to :func:`classify_from_annotations` (or the model's
+    ``classify_aggregate``) for discrete P/S picks.
     """
     import torch
 
     torch.set_num_threads(int(torch_threads))
-    sb_model, device = _load_seisbench_model(model, device)
+    sb_model, device, dtype = _load_seisbench_model(model, device, dtype=dtype)
     merged = _merge_network(Path(input_dir), n_stations=n_stations)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     kw = dict(batch_size=batch_size)
     kw.update(annotate_kwargs)
     probs = sb_model.annotate(merged, **kw)
-    probs.write(str(out / "annotate_probs.mseed"), format="MSEED")
+    suffix = "" if dtype == "fp32" else f"_{dtype}"
+    probs.write(str(out / f"annotate{suffix}_probs.mseed"), format="MSEED")
     return probs
+
+
+def annotate_bf16(
+    input_dir: PathLike,
+    output_dir: PathLike,
+    **kwargs: Any,
+) -> Stream:
+    """Convenience wrapper: ``annotate(..., dtype="bf16")``."""
+    kwargs.pop("dtype", None)
+    return annotate(input_dir, output_dir, dtype="bf16", **kwargs)
+
+
+def annotate_fp16(
+    input_dir: PathLike,
+    output_dir: PathLike,
+    **kwargs: Any,
+) -> Stream:
+    """Convenience wrapper: ``annotate(..., dtype="fp16")``."""
+    kwargs.pop("dtype", None)
+    return annotate(input_dir, output_dir, dtype="fp16", **kwargs)
+
+
+def classify_from_annotations(
+    model: Any,
+    annotations: Stream,
+    **thresholds: Any,
+) -> Any:
+    """Turn Annotate probability streams into discrete picks.
+
+    This is SeisBench's own ``classify_aggregate`` — the same step Classify
+    runs after Annotate — so reduced-precision Annotate outputs stay in the
+    Classify pick family.
+    """
+    argdict = dict(getattr(model, "default_args", {}) or {})
+    argdict.update(thresholds)
+    return model.classify_aggregate(annotations, argdict)
 
 
 def classify(
@@ -131,121 +243,65 @@ def classify(
     *,
     model: str = "PhaseNet",
     device: str = "cpu",
+    dtype: str = "fp32",
     n_stations: Optional[int] = None,
     torch_threads: int = 1,
     batched: bool = False,
     **classify_kwargs: Any,
 ) -> List[Any]:
-    """Run SeisBench ``model.classify()``.
+    """Run SeisBench picking, optionally at reduced Annotate precision.
 
-    By default this is one station at a time (the serial twin of
-    Model-Actor[classify]). Set ``batched=True`` to classify the merged
-    network in one call (SeisBench's best single-process picking path).
+    By default (``dtype="fp32"``) this calls ``model.classify()`` — one station
+    at a time, or the merged network when ``batched=True``.
+
+    When ``dtype`` is ``bf16`` or ``fp16``, this runs Annotate at that precision
+    then ``classify_aggregate`` (same composition SeisBench uses internally),
+    so discrete picks match the Classify extractor family.
     """
     import torch
 
     torch.set_num_threads(int(torch_threads))
-    sb_model, device = _load_seisbench_model(model, device)
+    dtype = _normalize_dtype(dtype)
+    sb_model, device, dtype = _load_seisbench_model(model, device, dtype=dtype)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     results: List[Any] = []
 
+    use_precision_annotate = dtype in ("fp16", "bf16")
+    annotate_kw = dict(batch_size=int(classify_kwargs.pop("batch_size", 256)))
+    thr_kw = dict(classify_kwargs)
+
+    def _one(stream: Stream) -> Any:
+        if use_precision_annotate:
+            annotations = sb_model.annotate(stream, **annotate_kw)
+            return classify_from_annotations(sb_model, annotations, **thr_kw)
+        return sb_model.classify(stream, **thr_kw)
+
     if batched:
         merged = _merge_network(Path(input_dir), n_stations=n_stations)
-        result = sb_model.classify(merged, **classify_kwargs)
+        result = _one(merged)
         _write_classify_picks(out, "NETWORK", result)
-        results.append(result)
-        return results
+        return [result]
 
     for i, sta_dir in enumerate(_station_dirs(Path(input_dir))):
         if n_stations is not None and i >= n_stations:
             break
-        st = _read_station_stream(sta_dir)
-        result = sb_model.classify(st, **classify_kwargs)
+        result = _one(_read_station_stream(sta_dir))
         _write_classify_picks(out, sta_dir.name, result)
         results.append(result)
     return results
 
 
-def slipstream(
-    input_dir: PathLike,
-    output_dir: PathLike,
-    *,
-    model: str = "PhaseNet",
-    device: str = "cpu",
-    dtype: str = "bf16",
-    compile_model: bool = False,
-    batch_size: int = 256,
-    n_stations: Optional[int] = None,
-    torch_threads: int = 1,
-    overlap_samples: int = 0,
-    p_threshold: float = 0.3,
-    s_threshold: float = 0.3,
-) -> Dict[str, Any]:
-    """Run RAPID's lean Slipstream forward on a synthetic or local network.
+def slipstream(*args: Any, **kwargs: Any) -> None:
+    """Removed. Use :func:`annotate` with ``dtype='bf16'`` or ``dtype='fp16'``.
 
-    Builds windowed batches the same way the fair benchmark does, runs the
-    lean PyTorch backend at ``dtype`` (``fp32`` / ``fp16`` / ``bf16``), and
-    writes picks under ``output_dir``. Prefer ``bf16`` for EQTransformer —
-    FP16 can overflow its attention padding sentinel.
+    Reduced-precision inference is now SeisBench Annotate after a weight cast.
+    Discrete picks come from :func:`classify_from_annotations` (SeisBench
+    ``classify_aggregate``), not RAPID's old threshold extractor.
     """
-    import torch
-
-    from rapid.backends.lean_pytorch import LeanPyTorchBackend
-    from rapid.benchmark.fairness import build_windowed_batch, windows_to_station_picks
-    from rapid.seisbench_precision_eval import phase_indices
-
-    torch.set_num_threads(int(torch_threads))
-    m = _resolve_model(model)
-    backend = LeanPyTorchBackend(
-        parent_model=m["parent"],
-        child_model=m["child"],
-        device=device,
-        dtype=dtype,
-        compile=compile_model,
+    raise RuntimeError(
+        "rapid.slipstream was removed. Use rapid.annotate(..., dtype='bf16') "
+        "or rapid.annotate_fp16 / rapid.annotate_bf16. For discrete picks, pass "
+        "the probability Stream to rapid.classify_from_annotations (SeisBench "
+        "classify_aggregate)."
     )
-    backend.load()
-
-    try:
-        streams: List[Tuple[str, Stream]] = []
-        for i, sta_dir in enumerate(_station_dirs(Path(input_dir))):
-            if n_stations is not None and i >= n_stations:
-                break
-            streams.append((sta_dir.name, _read_station_stream(sta_dir)))
-
-        in_samples = int(getattr(backend._raw_model, "in_samples", 3001) or 3001)
-        station_ids, windows, n_per, starts = build_windowed_batch(
-            backend._raw_model,
-            streams,
-            in_samples,
-            overlap_samples,
-            component_order=getattr(backend, "component_order", None),
-        )
-        preds = backend.infer_chunked(windows, batch_size=max(1, int(batch_size)))
-        p_idx, s_idx = phase_indices(backend._raw_model)
-        picks = windows_to_station_picks(
-            preds,
-            station_ids,
-            n_per,
-            starts,
-            p_idx=p_idx,
-            s_idx=s_idx,
-            p_threshold=p_threshold,
-            s_threshold=s_threshold,
-        )
-    finally:
-        backend.close()
-
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    summary = {
-        "model": model,
-        "dtype": dtype,
-        "device": device,
-        "n_stations": len(station_ids),
-        "batch_shape": list(np.shape(windows)),
-        "n_pick_stations": len(picks),
-    }
-    (out / "slipstream_summary.json").write_text(json.dumps(summary, indent=2))
-    (out / "slipstream_picks.json").write_text(json.dumps(picks, indent=2, default=str))
-    return {"summary": summary, "picks": picks, "preds": preds}

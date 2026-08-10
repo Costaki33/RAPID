@@ -1,12 +1,19 @@
 """RAPID — Resource-Aware Parallel Inference Dispatcher.
 
-Lean inference (Slipstream), fair deployment benchmarks, single-process
-SeisBench helpers, and optional Ray orchestration (Model-Actor / Ripper).
+Single-process SeisBench Annotate / Classify (including Annotate at FP16/BF16),
+fair deployment benchmarks, and optional Ray orchestration (Model-Actor / Ripper).
 """
 
 from importlib import metadata as _md
 
-from .api import annotate, classify, slipstream
+from .api import (
+    annotate,
+    annotate_bf16,
+    annotate_fp16,
+    classify,
+    classify_from_annotations,
+    slipstream,
+)
 
 try:
     from .orchestration import (
@@ -41,7 +48,10 @@ except _md.PackageNotFoundError:
 
 __all__ = [
     "annotate",
+    "annotate_bf16",
+    "annotate_fp16",
     "classify",
+    "classify_from_annotations",
     "slipstream",
     "pick",
     "model_actor",

@@ -2096,7 +2096,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 test_csv_filepath,
                 trial_data,
                 extra={
-                    "orchestration_strategy": ("ripper_slipstream" if slipstream_inference else "ripper"),
+                    "orchestration_strategy": ((f"ripper_annotate_{slipstream_dtype}") if slipstream_inference else "ripper"),
                     "use_gpu": bool(use_gpu),
                     "model_type": model_type_lower,
                     "batch_size": (int(slipstream_batch_size) if slipstream_inference else None),
@@ -2909,7 +2909,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Trial Success": "",
             "Error Message": str(""),
             "Comments": (
-                (f"[Slipstream in Model-Actor] dtype={slipstream_dtype}, compile={slipstream_compile}; "
+                (f"[Annotate-precision in Model-Actor] dtype={slipstream_dtype}, compile={slipstream_compile}; "
                  if slipstream_inference else "")
                 + (actor_cap_comment or "")
             ),
@@ -2920,7 +2920,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             test_csv_filepath,
             trial_data,
             extra={
-                "orchestration_strategy": ("modelactor_slipstream" if slipstream_inference else "modelactor"),
+                "orchestration_strategy": ((f"modelactor_annotate_{slipstream_dtype}") if slipstream_inference else "modelactor"),
                 "use_gpu": bool(use_gpu),
                 "model_type": model_type_lower,
                 "batch_size": (int(slipstream_batch_size) if slipstream_inference else None),
@@ -2995,6 +2995,50 @@ class ModelActor:
                                             batch_size=batch_size, norm_mode=norm_mode)
         return self.model.predict(pred_generator, verbose=0)
 
+    def predict_station_group(self, station_streams, preprocess_args):
+        """Process a group of (station, ObsPy Stream) items inside one actor.
+
+        Station-group dispatch (SCMLPick-style): one remote call per actor share,
+        with EQCCT preprocess + predict + pick extraction for each station.
+        Returns {station: {"p": [samples], "s": [samples]}}.
+        """
+        from rapid.orchestration.models.eqcct_tf_models import PreLoadGeneratorTest
+
+        out: dict = {}
+        batch_size = int(preprocess_args.get("batch_size", 1) or 1)
+        norm_mode = preprocess_args.get("normalization_mode", "std")
+        for station, st in station_streams:
+            packed = _eqcct_stream_to_nparray(preprocess_args, st, station, files_list=None)
+            if packed is None:
+                out[str(station)] = {"p": [], "s": []}
+                continue
+            meta, data_set, _hp, _lp = packed
+            predP, predS = self.model.predict(
+                PreLoadGeneratorTest(meta["trace_start_time"], data_set,
+                                     batch_size=batch_size, norm_mode=norm_mode),
+                verbose=0,
+            )
+            p_samples: list = []
+            s_samples: list = []
+            for ix in range(len(predP)):
+                Ppicks, _Pprob = _picker(preprocess_args, predP[ix, :, 0])
+                Spicks, _Sprob = _picker(preprocess_args, predS[ix, :, 0], "S_threshold")
+                # _picker returns peak sample indices within the EQCCT window.
+                for pt in Ppicks or []:
+                    if pt is not None:
+                        try:
+                            p_samples.append(float(pt))
+                        except Exception:
+                            pass
+                for pt in Spicks or []:
+                    if pt is not None:
+                        try:
+                            s_samples.append(float(pt))
+                        except Exception:
+                            pass
+            out[str(station)] = {"p": p_samples, "s": s_samples}
+        return out
+
 
 def _create_seisbench_model_actors(
     n_actors: int,
@@ -3011,22 +3055,22 @@ def _create_seisbench_model_actors(
     slipstream_batch_size: int = 256,
     logger=None,
 ):
-    """Create SeisBench or Slipstream Model-Actor Ray workers."""
+    """Create SeisBench Classify or Annotate-precision Model-Actor Ray workers."""
     if slipstream_inference:
-        from rapid.orchestration.actors.slipstream_actor import SlipstreamSeisBenchModelActor
+        from rapid.orchestration.actors.annotate_precision_actor import AnnotatePrecisionModelActor
 
-        actor_cls = SlipstreamSeisBenchModelActor
+        actor_cls = AnnotatePrecisionModelActor
         remote_kwargs = dict(
             parent_model_name=parent_model_name,
             child_model_name=child_model_name,
             gpus_to_use=gpus_to_use,
             use_gpu=use_gpu,
-            slipstream_dtype=slipstream_dtype,
-            slipstream_compile=slipstream_compile,
+            annotate_dtype=slipstream_dtype,
+            annotate_compile=slipstream_compile,
             overlap_samples=slipstream_overlap_samples,
-            lean_batch_size=slipstream_batch_size,
+            annotate_batch_size=slipstream_batch_size,
         )
-        label = f"SlipstreamSeisBenchModelActor(dtype={slipstream_dtype}, compile={slipstream_compile})"
+        label = f"AnnotatePrecisionModelActor(dtype={slipstream_dtype}, compile={slipstream_compile})"
     else:
         actor_cls = SeisBenchModelActor
         remote_kwargs = dict(
@@ -3202,7 +3246,8 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         pos, station, out_dir, args = predict_args
         use_shared_stream = False
 
-    use_slipstream_array_path = bool(args.get("slipstream_inference"))
+    # Annotate-precision uses real SeisBench annotate on Streams (no lean array path).
+    use_slipstream_array_path = False
 
     def _pfx(msg: str) -> str:
         return _apply_log_chunk_prefix(args, msg)
@@ -3979,46 +4024,35 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     import torch
 
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
-    use_slipstream = bool(args.get("slipstream_inference"))
+    use_slipstream = bool(args.get("slipstream_inference"))  # annotate_precision alias
 
     # ===== TIMING: Track model load time for ripper mode analysis =====
     model_load_start = monotonic_s()
 
-    lean_backend = None
+    lean_backend = None  # unused; kept so later None-checks stay valid
     model_wrapper = None
     stage_probes = None
+    # Always load SeisBench; reduced precision casts weights then annotate+aggregate.
+    model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
+    model_wrapper.load_model()
     if use_slipstream:
-        from rapid.orchestration.actors.slipstream_actor import _ensure_rapid_on_path
-
-        _ensure_rapid_on_path()
-        from rapid.backends.lean_pytorch import LeanPyTorchBackend
-
-        lean_backend = LeanPyTorchBackend(
-            parent_model_name,
-            child_model_name,
-            device=("cuda:0" if (gpu and torch.cuda.is_available()) else "cpu"),
-            dtype=str(args.get("slipstream_dtype", "bf16")),
-            compile=bool(args.get("slipstream_compile", False)),
+        from rapid.orchestration.actors.annotate_precision_actor import _cast_model
+        model_wrapper.model = _cast_model(
+            model_wrapper.model,
+            str(args.get("slipstream_dtype", "bf16")),
+            ("cuda:0" if (gpu and torch.cuda.is_available()) else "cpu"),
         )
-        lean_backend.load()
-    else:
-        # Create and load the model (skip validation — driver already verified the model name)
-        model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
-        model_wrapper.load_model()
-
-        # Move model to device if using GPU
-        if gpu and torch.cuda.is_available():
-            try:
-                if hasattr(model_wrapper.model, 'to'):
-                    model_wrapper.model.to(device)
-            except Exception:
-                pass
-        # Stage probes: measured preprocess + pick aggregation inside classify().
+    elif gpu and torch.cuda.is_available():
         try:
-            from rapid.orchestration.support.timing_util import SeisBenchStageProbes
-            stage_probes = SeisBenchStageProbes(model_wrapper.model)
+            if hasattr(model_wrapper.model, 'to'):
+                model_wrapper.model.to(device)
         except Exception:
-            stage_probes = None
+            pass
+    try:
+        from rapid.orchestration.support.timing_util import SeisBenchStageProbes
+        stage_probes = SeisBenchStageProbes(model_wrapper.model)
+    except Exception:
+        stage_probes = None
     if gpu:
         cuda_synchronize_best_effort()
     model_load_time = monotonic_s() - model_load_start
@@ -4027,15 +4061,10 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     # cost is paid per task; measure it separately from steady-state inference) =====
     warmup_start = monotonic_s()
     try:
-        if use_slipstream:
-            import numpy as _np
-
-            _dummy = _np.zeros((1, 3, int(lean_backend.in_samples)), dtype=_np.float32)
-            _ = lean_backend.infer_chunked(_dummy, batch_size=1)
-        else:
-            _in_samples = int(getattr(model_wrapper.model, "in_samples", 3001) or 3001)
-            with torch.no_grad():
-                _ = model_wrapper.model(torch.zeros(1, 3, _in_samples, device=device))
+        _in_samples = int(getattr(model_wrapper.model, "in_samples", 3001) or 3001)
+        with torch.no_grad():
+            _dev = next(model_wrapper.model.parameters()).device
+            _ = model_wrapper.model(torch.zeros(1, 3, _in_samples, device=_dev, dtype=next(model_wrapper.model.parameters()).dtype))
         if gpu:
             cuda_synchronize_best_effort()
     except Exception:
@@ -4113,15 +4142,18 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             # ===== TIMING: inference (model forward pass) =====
             inference_start = monotonic_s()
             if use_slipstream:
-                from rapid.orchestration.actors.slipstream_actor import lean_classify_stream
+                from rapid.orchestration.actors.annotate_precision_actor import (
+                    annotate_precision_classify_stream,
+                )
 
-                classify_output = lean_classify_stream(
-                    lean_backend,
+                classify_output = annotate_precision_classify_stream(
+                    model_wrapper.model,
                     stream,
                     overlap_samples=int(args.get('slipstream_overlap_samples', 0) or 0),
                     batch_size=int(args.get('slipstream_batch_size', 256) or 256),
                     P_threshold=args.get('P_threshold', 0.3),
                     S_threshold=args.get('S_threshold', 0.3),
+                    Detection_threshold=Detection_threshold,
                     use_gpu=gpu,
                 )
             else:
