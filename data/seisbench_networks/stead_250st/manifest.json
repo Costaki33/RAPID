@@ -1,0 +1,2272 @@
+{
+  "meta": {
+    "dataset": "stead",
+    "n_stations": 250,
+    "n_unique": 250,
+    "tiled": false,
+    "unique_stations": true,
+    "seed": 42,
+    "require_s": true,
+    "min_pick_sample": 50,
+    "max_pick_sample": 2951,
+    "trim_samples": null,
+    "t0": "2024-01-01T00:00:00.000000Z",
+    "start_time": "2024-01-01 00:00:00",
+    "end_time": "2024-01-01 00:01:00",
+    "timechunk_dt": 60,
+    "target_sampling_rate": 100.0,
+    "match_tolerance_samples": 50
+  },
+  "stations": {
+    "S0000": {
+      "dataset": "stead",
+      "source_trace_row": 461583,
+      "p_sample": 600,
+      "s_sample": 1013,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0001": {
+      "dataset": "stead",
+      "source_trace_row": 663277,
+      "p_sample": 900,
+      "s_sample": 1783,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0002": {
+      "dataset": "stead",
+      "source_trace_row": 551593,
+      "p_sample": 900,
+      "s_sample": 1132,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0003": {
+      "dataset": "stead",
+      "source_trace_row": 1050888,
+      "p_sample": 500,
+      "s_sample": 711,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0004": {
+      "dataset": "stead",
+      "source_trace_row": 298796,
+      "p_sample": 700,
+      "s_sample": 993,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0005": {
+      "dataset": "stead",
+      "source_trace_row": 237380,
+      "p_sample": 1275,
+      "s_sample": 1328,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0006": {
+      "dataset": "stead",
+      "source_trace_row": 598412,
+      "p_sample": 399,
+      "s_sample": 1749,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0007": {
+      "dataset": "stead",
+      "source_trace_row": 968804,
+      "p_sample": 600,
+      "s_sample": 931,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0008": {
+      "dataset": "stead",
+      "source_trace_row": 709915,
+      "p_sample": 500,
+      "s_sample": 940,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0009": {
+      "dataset": "stead",
+      "source_trace_row": 1047849,
+      "p_sample": 600,
+      "s_sample": 831,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0010": {
+      "dataset": "stead",
+      "source_trace_row": 599724,
+      "p_sample": 500,
+      "s_sample": 1590,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0011": {
+      "dataset": "stead",
+      "source_trace_row": 820118,
+      "p_sample": 600,
+      "s_sample": 1927,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0012": {
+      "dataset": "stead",
+      "source_trace_row": 1095542,
+      "p_sample": 400,
+      "s_sample": 1705,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0013": {
+      "dataset": "stead",
+      "source_trace_row": 574354,
+      "p_sample": 593,
+      "s_sample": 1675,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0014": {
+      "dataset": "stead",
+      "source_trace_row": 378958,
+      "p_sample": 600,
+      "s_sample": 1142,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0015": {
+      "dataset": "stead",
+      "source_trace_row": 294439,
+      "p_sample": 600,
+      "s_sample": 882,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0016": {
+      "dataset": "stead",
+      "source_trace_row": 820987,
+      "p_sample": 800,
+      "s_sample": 1952,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0017": {
+      "dataset": "stead",
+      "source_trace_row": 1151062,
+      "p_sample": 500,
+      "s_sample": 1779,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0018": {
+      "dataset": "stead",
+      "source_trace_row": 730074,
+      "p_sample": 500,
+      "s_sample": 552,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0019": {
+      "dataset": "stead",
+      "source_trace_row": 938509,
+      "p_sample": 414,
+      "s_sample": 1070,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0020": {
+      "dataset": "stead",
+      "source_trace_row": 764961,
+      "p_sample": 895,
+      "s_sample": 1011,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0021": {
+      "dataset": "stead",
+      "source_trace_row": 727432,
+      "p_sample": 500,
+      "s_sample": 568,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0022": {
+      "dataset": "stead",
+      "source_trace_row": 1044693,
+      "p_sample": 700,
+      "s_sample": 1009,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0023": {
+      "dataset": "stead",
+      "source_trace_row": 1178861,
+      "p_sample": 700,
+      "s_sample": 1094,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0024": {
+      "dataset": "stead",
+      "source_trace_row": 1247673,
+      "p_sample": 341,
+      "s_sample": 987,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0025": {
+      "dataset": "stead",
+      "source_trace_row": 849996,
+      "p_sample": 700,
+      "s_sample": 2177,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0026": {
+      "dataset": "stead",
+      "source_trace_row": 897032,
+      "p_sample": 800,
+      "s_sample": 1214,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0027": {
+      "dataset": "stead",
+      "source_trace_row": 1063414,
+      "p_sample": 500,
+      "s_sample": 1757,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0028": {
+      "dataset": "stead",
+      "source_trace_row": 1029631,
+      "p_sample": 900,
+      "s_sample": 1424,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0029": {
+      "dataset": "stead",
+      "source_trace_row": 1048605,
+      "p_sample": 700,
+      "s_sample": 971,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0030": {
+      "dataset": "stead",
+      "source_trace_row": 1037525,
+      "p_sample": 800,
+      "s_sample": 1953,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0031": {
+      "dataset": "stead",
+      "source_trace_row": 697114,
+      "p_sample": 587,
+      "s_sample": 1336,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0032": {
+      "dataset": "stead",
+      "source_trace_row": 664356,
+      "p_sample": 500,
+      "s_sample": 718,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0033": {
+      "dataset": "stead",
+      "source_trace_row": 1164957,
+      "p_sample": 396,
+      "s_sample": 1572,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0034": {
+      "dataset": "stead",
+      "source_trace_row": 957652,
+      "p_sample": 1521,
+      "s_sample": 1853,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0035": {
+      "dataset": "stead",
+      "source_trace_row": 620733,
+      "p_sample": 900,
+      "s_sample": 2025,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0036": {
+      "dataset": "stead",
+      "source_trace_row": 847418,
+      "p_sample": 800,
+      "s_sample": 887,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0037": {
+      "dataset": "stead",
+      "source_trace_row": 1155553,
+      "p_sample": 1000,
+      "s_sample": 1864,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0038": {
+      "dataset": "stead",
+      "source_trace_row": 877697,
+      "p_sample": 800,
+      "s_sample": 1211,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0039": {
+      "dataset": "stead",
+      "source_trace_row": 419424,
+      "p_sample": 800,
+      "s_sample": 2019,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0040": {
+      "dataset": "stead",
+      "source_trace_row": 964451,
+      "p_sample": 400,
+      "s_sample": 1117,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0041": {
+      "dataset": "stead",
+      "source_trace_row": 778639,
+      "p_sample": 595,
+      "s_sample": 677,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0042": {
+      "dataset": "stead",
+      "source_trace_row": 1003699,
+      "p_sample": 800,
+      "s_sample": 2621,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0043": {
+      "dataset": "stead",
+      "source_trace_row": 1044393,
+      "p_sample": 900,
+      "s_sample": 1159,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0044": {
+      "dataset": "stead",
+      "source_trace_row": 1144731,
+      "p_sample": 1000,
+      "s_sample": 1852,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0045": {
+      "dataset": "stead",
+      "source_trace_row": 527295,
+      "p_sample": 794,
+      "s_sample": 2080,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0046": {
+      "dataset": "stead",
+      "source_trace_row": 390953,
+      "p_sample": 800,
+      "s_sample": 1374,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0047": {
+      "dataset": "stead",
+      "source_trace_row": 753055,
+      "p_sample": 400,
+      "s_sample": 461,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0048": {
+      "dataset": "stead",
+      "source_trace_row": 821480,
+      "p_sample": 497,
+      "s_sample": 1619,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0049": {
+      "dataset": "stead",
+      "source_trace_row": 812290,
+      "p_sample": 800,
+      "s_sample": 1917,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0050": {
+      "dataset": "stead",
+      "source_trace_row": 613274,
+      "p_sample": 500,
+      "s_sample": 1487,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0051": {
+      "dataset": "stead",
+      "source_trace_row": 1226762,
+      "p_sample": 600,
+      "s_sample": 2196,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0052": {
+      "dataset": "stead",
+      "source_trace_row": 698613,
+      "p_sample": 800,
+      "s_sample": 1704,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0053": {
+      "dataset": "stead",
+      "source_trace_row": 696531,
+      "p_sample": 500,
+      "s_sample": 1117,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0054": {
+      "dataset": "stead",
+      "source_trace_row": 418408,
+      "p_sample": 500,
+      "s_sample": 1129,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0055": {
+      "dataset": "stead",
+      "source_trace_row": 1016126,
+      "p_sample": 800,
+      "s_sample": 866,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0056": {
+      "dataset": "stead",
+      "source_trace_row": 1251883,
+      "p_sample": 600,
+      "s_sample": 1040,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0057": {
+      "dataset": "stead",
+      "source_trace_row": 264593,
+      "p_sample": 600,
+      "s_sample": 2130,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0058": {
+      "dataset": "stead",
+      "source_trace_row": 728881,
+      "p_sample": 600,
+      "s_sample": 663,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0059": {
+      "dataset": "stead",
+      "source_trace_row": 864545,
+      "p_sample": 500,
+      "s_sample": 713,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0060": {
+      "dataset": "stead",
+      "source_trace_row": 249964,
+      "p_sample": 800,
+      "s_sample": 1776,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0061": {
+      "dataset": "stead",
+      "source_trace_row": 489383,
+      "p_sample": 400,
+      "s_sample": 636,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0062": {
+      "dataset": "stead",
+      "source_trace_row": 540187,
+      "p_sample": 500,
+      "s_sample": 2889,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0063": {
+      "dataset": "stead",
+      "source_trace_row": 626547,
+      "p_sample": 1000,
+      "s_sample": 2687,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0064": {
+      "dataset": "stead",
+      "source_trace_row": 314179,
+      "p_sample": 600,
+      "s_sample": 969,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0065": {
+      "dataset": "stead",
+      "source_trace_row": 1191836,
+      "p_sample": 600,
+      "s_sample": 914,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0066": {
+      "dataset": "stead",
+      "source_trace_row": 570917,
+      "p_sample": 400,
+      "s_sample": 728,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0067": {
+      "dataset": "stead",
+      "source_trace_row": 813272,
+      "p_sample": 400,
+      "s_sample": 2758,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0068": {
+      "dataset": "stead",
+      "source_trace_row": 438937,
+      "p_sample": 800,
+      "s_sample": 1783,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0069": {
+      "dataset": "stead",
+      "source_trace_row": 943768,
+      "p_sample": 900,
+      "s_sample": 2218,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0070": {
+      "dataset": "stead",
+      "source_trace_row": 899835,
+      "p_sample": 900,
+      "s_sample": 1876,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0071": {
+      "dataset": "stead",
+      "source_trace_row": 1007374,
+      "p_sample": 800,
+      "s_sample": 1711,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0072": {
+      "dataset": "stead",
+      "source_trace_row": 978891,
+      "p_sample": 900,
+      "s_sample": 2143,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0073": {
+      "dataset": "stead",
+      "source_trace_row": 235491,
+      "p_sample": 400,
+      "s_sample": 1512,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0074": {
+      "dataset": "stead",
+      "source_trace_row": 477454,
+      "p_sample": 600,
+      "s_sample": 931,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0075": {
+      "dataset": "stead",
+      "source_trace_row": 660759,
+      "p_sample": 700,
+      "s_sample": 1132,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0076": {
+      "dataset": "stead",
+      "source_trace_row": 560686,
+      "p_sample": 600,
+      "s_sample": 903,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0077": {
+      "dataset": "stead",
+      "source_trace_row": 1051067,
+      "p_sample": 600,
+      "s_sample": 720,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0078": {
+      "dataset": "stead",
+      "source_trace_row": 948978,
+      "p_sample": 902,
+      "s_sample": 1435,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0079": {
+      "dataset": "stead",
+      "source_trace_row": 420494,
+      "p_sample": 700,
+      "s_sample": 1419,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0080": {
+      "dataset": "stead",
+      "source_trace_row": 1061017,
+      "p_sample": 500,
+      "s_sample": 1027,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0081": {
+      "dataset": "stead",
+      "source_trace_row": 1258459,
+      "p_sample": 800,
+      "s_sample": 1616,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0082": {
+      "dataset": "stead",
+      "source_trace_row": 526856,
+      "p_sample": 900,
+      "s_sample": 2168,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0083": {
+      "dataset": "stead",
+      "source_trace_row": 523922,
+      "p_sample": 900,
+      "s_sample": 1228,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0084": {
+      "dataset": "stead",
+      "source_trace_row": 537653,
+      "p_sample": 800,
+      "s_sample": 1794,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0085": {
+      "dataset": "stead",
+      "source_trace_row": 764506,
+      "p_sample": 808,
+      "s_sample": 874,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0086": {
+      "dataset": "stead",
+      "source_trace_row": 1241342,
+      "p_sample": 900,
+      "s_sample": 948,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0087": {
+      "dataset": "stead",
+      "source_trace_row": 687179,
+      "p_sample": 900,
+      "s_sample": 1690,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0088": {
+      "dataset": "stead",
+      "source_trace_row": 698451,
+      "p_sample": 1000,
+      "s_sample": 2148,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0089": {
+      "dataset": "stead",
+      "source_trace_row": 1257579,
+      "p_sample": 500,
+      "s_sample": 1094,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0090": {
+      "dataset": "stead",
+      "source_trace_row": 630312,
+      "p_sample": 500,
+      "s_sample": 741,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0091": {
+      "dataset": "stead",
+      "source_trace_row": 690192,
+      "p_sample": 700,
+      "s_sample": 1200,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0092": {
+      "dataset": "stead",
+      "source_trace_row": 1262261,
+      "p_sample": 900,
+      "s_sample": 1332,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0093": {
+      "dataset": "stead",
+      "source_trace_row": 969574,
+      "p_sample": 700,
+      "s_sample": 1679,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0094": {
+      "dataset": "stead",
+      "source_trace_row": 240864,
+      "p_sample": 900,
+      "s_sample": 2498,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0095": {
+      "dataset": "stead",
+      "source_trace_row": 397165,
+      "p_sample": 700,
+      "s_sample": 1816,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0096": {
+      "dataset": "stead",
+      "source_trace_row": 738416,
+      "p_sample": 400,
+      "s_sample": 464,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0097": {
+      "dataset": "stead",
+      "source_trace_row": 1174819,
+      "p_sample": 600,
+      "s_sample": 712,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0098": {
+      "dataset": "stead",
+      "source_trace_row": 980782,
+      "p_sample": 900,
+      "s_sample": 2302,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0099": {
+      "dataset": "stead",
+      "source_trace_row": 957373,
+      "p_sample": 800,
+      "s_sample": 1219,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0100": {
+      "dataset": "stead",
+      "source_trace_row": 709970,
+      "p_sample": 600,
+      "s_sample": 1877,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0101": {
+      "dataset": "stead",
+      "source_trace_row": 519670,
+      "p_sample": 700,
+      "s_sample": 1443,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0102": {
+      "dataset": "stead",
+      "source_trace_row": 945350,
+      "p_sample": 500,
+      "s_sample": 1546,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0103": {
+      "dataset": "stead",
+      "source_trace_row": 729068,
+      "p_sample": 700,
+      "s_sample": 813,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0104": {
+      "dataset": "stead",
+      "source_trace_row": 825643,
+      "p_sample": 798,
+      "s_sample": 1411,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0105": {
+      "dataset": "stead",
+      "source_trace_row": 431834,
+      "p_sample": 900,
+      "s_sample": 1394,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0106": {
+      "dataset": "stead",
+      "source_trace_row": 301054,
+      "p_sample": 400,
+      "s_sample": 1167,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0107": {
+      "dataset": "stead",
+      "source_trace_row": 497601,
+      "p_sample": 499,
+      "s_sample": 1466,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0108": {
+      "dataset": "stead",
+      "source_trace_row": 782011,
+      "p_sample": 700,
+      "s_sample": 767,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0109": {
+      "dataset": "stead",
+      "source_trace_row": 697807,
+      "p_sample": 400,
+      "s_sample": 1014,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0110": {
+      "dataset": "stead",
+      "source_trace_row": 1252783,
+      "p_sample": 700,
+      "s_sample": 1572,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0111": {
+      "dataset": "stead",
+      "source_trace_row": 256789,
+      "p_sample": 504,
+      "s_sample": 727,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0112": {
+      "dataset": "stead",
+      "source_trace_row": 791823,
+      "p_sample": 693,
+      "s_sample": 758,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0113": {
+      "dataset": "stead",
+      "source_trace_row": 925788,
+      "p_sample": 900,
+      "s_sample": 1383,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0114": {
+      "dataset": "stead",
+      "source_trace_row": 741122,
+      "p_sample": 600,
+      "s_sample": 660,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0115": {
+      "dataset": "stead",
+      "source_trace_row": 549340,
+      "p_sample": 900,
+      "s_sample": 1901,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0116": {
+      "dataset": "stead",
+      "source_trace_row": 661500,
+      "p_sample": 500,
+      "s_sample": 827,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0117": {
+      "dataset": "stead",
+      "source_trace_row": 442348,
+      "p_sample": 601,
+      "s_sample": 723,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0118": {
+      "dataset": "stead",
+      "source_trace_row": 1075119,
+      "p_sample": 498,
+      "s_sample": 992,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0119": {
+      "dataset": "stead",
+      "source_trace_row": 1229564,
+      "p_sample": 700,
+      "s_sample": 1179,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0120": {
+      "dataset": "stead",
+      "source_trace_row": 548848,
+      "p_sample": 1000,
+      "s_sample": 2105,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0121": {
+      "dataset": "stead",
+      "source_trace_row": 259187,
+      "p_sample": 796,
+      "s_sample": 1199,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0122": {
+      "dataset": "stead",
+      "source_trace_row": 807112,
+      "p_sample": 900,
+      "s_sample": 2190,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0123": {
+      "dataset": "stead",
+      "source_trace_row": 596147,
+      "p_sample": 500,
+      "s_sample": 1042,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0124": {
+      "dataset": "stead",
+      "source_trace_row": 966232,
+      "p_sample": 500,
+      "s_sample": 1224,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0125": {
+      "dataset": "stead",
+      "source_trace_row": 456143,
+      "p_sample": 800,
+      "s_sample": 1394,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0126": {
+      "dataset": "stead",
+      "source_trace_row": 960897,
+      "p_sample": 700,
+      "s_sample": 965,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0127": {
+      "dataset": "stead",
+      "source_trace_row": 656835,
+      "p_sample": 900,
+      "s_sample": 2180,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0128": {
+      "dataset": "stead",
+      "source_trace_row": 745546,
+      "p_sample": 500,
+      "s_sample": 567,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0129": {
+      "dataset": "stead",
+      "source_trace_row": 369503,
+      "p_sample": 696,
+      "s_sample": 955,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0130": {
+      "dataset": "stead",
+      "source_trace_row": 377253,
+      "p_sample": 900,
+      "s_sample": 1264,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0131": {
+      "dataset": "stead",
+      "source_trace_row": 1260392,
+      "p_sample": 900,
+      "s_sample": 1400,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0132": {
+      "dataset": "stead",
+      "source_trace_row": 331255,
+      "p_sample": 500,
+      "s_sample": 1038,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0133": {
+      "dataset": "stead",
+      "source_trace_row": 315398,
+      "p_sample": 800,
+      "s_sample": 1050,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0134": {
+      "dataset": "stead",
+      "source_trace_row": 1015252,
+      "p_sample": 600,
+      "s_sample": 669,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0135": {
+      "dataset": "stead",
+      "source_trace_row": 591185,
+      "p_sample": 799,
+      "s_sample": 1109,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0136": {
+      "dataset": "stead",
+      "source_trace_row": 698889,
+      "p_sample": 1000,
+      "s_sample": 2334,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0137": {
+      "dataset": "stead",
+      "source_trace_row": 535995,
+      "p_sample": 700,
+      "s_sample": 888,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0138": {
+      "dataset": "stead",
+      "source_trace_row": 674537,
+      "p_sample": 836,
+      "s_sample": 1330,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0139": {
+      "dataset": "stead",
+      "source_trace_row": 1261206,
+      "p_sample": 700,
+      "s_sample": 1674,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0140": {
+      "dataset": "stead",
+      "source_trace_row": 1098239,
+      "p_sample": 900,
+      "s_sample": 1209,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0141": {
+      "dataset": "stead",
+      "source_trace_row": 942648,
+      "p_sample": 500,
+      "s_sample": 2224,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0142": {
+      "dataset": "stead",
+      "source_trace_row": 730053,
+      "p_sample": 700,
+      "s_sample": 760,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0143": {
+      "dataset": "stead",
+      "source_trace_row": 450331,
+      "p_sample": 400,
+      "s_sample": 830,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0144": {
+      "dataset": "stead",
+      "source_trace_row": 1008696,
+      "p_sample": 500,
+      "s_sample": 2263,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0145": {
+      "dataset": "stead",
+      "source_trace_row": 875092,
+      "p_sample": 900,
+      "s_sample": 1280,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0146": {
+      "dataset": "stead",
+      "source_trace_row": 320492,
+      "p_sample": 600,
+      "s_sample": 1107,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0147": {
+      "dataset": "stead",
+      "source_trace_row": 1109946,
+      "p_sample": 700,
+      "s_sample": 1060,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0148": {
+      "dataset": "stead",
+      "source_trace_row": 259009,
+      "p_sample": 400,
+      "s_sample": 1560,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0149": {
+      "dataset": "stead",
+      "source_trace_row": 1029329,
+      "p_sample": 700,
+      "s_sample": 1159,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0150": {
+      "dataset": "stead",
+      "source_trace_row": 493527,
+      "p_sample": 900,
+      "s_sample": 1786,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0151": {
+      "dataset": "stead",
+      "source_trace_row": 259516,
+      "p_sample": 500,
+      "s_sample": 1503,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0152": {
+      "dataset": "stead",
+      "source_trace_row": 931510,
+      "p_sample": 800,
+      "s_sample": 1399,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0153": {
+      "dataset": "stead",
+      "source_trace_row": 857398,
+      "p_sample": 800,
+      "s_sample": 1196,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0154": {
+      "dataset": "stead",
+      "source_trace_row": 1215077,
+      "p_sample": 701,
+      "s_sample": 1564,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0155": {
+      "dataset": "stead",
+      "source_trace_row": 1158928,
+      "p_sample": 800,
+      "s_sample": 1872,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0156": {
+      "dataset": "stead",
+      "source_trace_row": 782770,
+      "p_sample": 792,
+      "s_sample": 872,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0157": {
+      "dataset": "stead",
+      "source_trace_row": 409827,
+      "p_sample": 797,
+      "s_sample": 1205,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0158": {
+      "dataset": "stead",
+      "source_trace_row": 686089,
+      "p_sample": 400,
+      "s_sample": 1055,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0159": {
+      "dataset": "stead",
+      "source_trace_row": 1222269,
+      "p_sample": 500,
+      "s_sample": 1275,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0160": {
+      "dataset": "stead",
+      "source_trace_row": 896135,
+      "p_sample": 500,
+      "s_sample": 1176,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0161": {
+      "dataset": "stead",
+      "source_trace_row": 910836,
+      "p_sample": 900,
+      "s_sample": 1919,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0162": {
+      "dataset": "stead",
+      "source_trace_row": 1220101,
+      "p_sample": 500,
+      "s_sample": 650,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0163": {
+      "dataset": "stead",
+      "source_trace_row": 631398,
+      "p_sample": 800,
+      "s_sample": 1039,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0164": {
+      "dataset": "stead",
+      "source_trace_row": 1057596,
+      "p_sample": 400,
+      "s_sample": 1100,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0165": {
+      "dataset": "stead",
+      "source_trace_row": 1079920,
+      "p_sample": 700,
+      "s_sample": 1069,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0166": {
+      "dataset": "stead",
+      "source_trace_row": 772635,
+      "p_sample": 402,
+      "s_sample": 492,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0167": {
+      "dataset": "stead",
+      "source_trace_row": 919970,
+      "p_sample": 500,
+      "s_sample": 1047,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0168": {
+      "dataset": "stead",
+      "source_trace_row": 892923,
+      "p_sample": 900,
+      "s_sample": 1530,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0169": {
+      "dataset": "stead",
+      "source_trace_row": 489426,
+      "p_sample": 694,
+      "s_sample": 1088,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0170": {
+      "dataset": "stead",
+      "source_trace_row": 796617,
+      "p_sample": 398,
+      "s_sample": 458,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0171": {
+      "dataset": "stead",
+      "source_trace_row": 1186619,
+      "p_sample": 500,
+      "s_sample": 1695,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0172": {
+      "dataset": "stead",
+      "source_trace_row": 1034761,
+      "p_sample": 400,
+      "s_sample": 596,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0173": {
+      "dataset": "stead",
+      "source_trace_row": 644190,
+      "p_sample": 597,
+      "s_sample": 984,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0174": {
+      "dataset": "stead",
+      "source_trace_row": 1099222,
+      "p_sample": 600,
+      "s_sample": 939,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0175": {
+      "dataset": "stead",
+      "source_trace_row": 496312,
+      "p_sample": 900,
+      "s_sample": 1748,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0176": {
+      "dataset": "stead",
+      "source_trace_row": 592008,
+      "p_sample": 700,
+      "s_sample": 868,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0177": {
+      "dataset": "stead",
+      "source_trace_row": 667230,
+      "p_sample": 400,
+      "s_sample": 662,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0178": {
+      "dataset": "stead",
+      "source_trace_row": 867904,
+      "p_sample": 400,
+      "s_sample": 543,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0179": {
+      "dataset": "stead",
+      "source_trace_row": 327124,
+      "p_sample": 391,
+      "s_sample": 1553,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0180": {
+      "dataset": "stead",
+      "source_trace_row": 623692,
+      "p_sample": 800,
+      "s_sample": 2251,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0181": {
+      "dataset": "stead",
+      "source_trace_row": 710980,
+      "p_sample": 400,
+      "s_sample": 1303,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0182": {
+      "dataset": "stead",
+      "source_trace_row": 660458,
+      "p_sample": 800,
+      "s_sample": 2001,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0183": {
+      "dataset": "stead",
+      "source_trace_row": 237360,
+      "p_sample": 787,
+      "s_sample": 902,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0184": {
+      "dataset": "stead",
+      "source_trace_row": 653622,
+      "p_sample": 599,
+      "s_sample": 2168,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0185": {
+      "dataset": "stead",
+      "source_trace_row": 659286,
+      "p_sample": 400,
+      "s_sample": 1066,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0186": {
+      "dataset": "stead",
+      "source_trace_row": 758925,
+      "p_sample": 600,
+      "s_sample": 665,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0187": {
+      "dataset": "stead",
+      "source_trace_row": 246989,
+      "p_sample": 801,
+      "s_sample": 916,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0188": {
+      "dataset": "stead",
+      "source_trace_row": 653668,
+      "p_sample": 682,
+      "s_sample": 1781,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0189": {
+      "dataset": "stead",
+      "source_trace_row": 331912,
+      "p_sample": 600,
+      "s_sample": 1701,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0190": {
+      "dataset": "stead",
+      "source_trace_row": 938255,
+      "p_sample": 400,
+      "s_sample": 1260,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0191": {
+      "dataset": "stead",
+      "source_trace_row": 252626,
+      "p_sample": 500,
+      "s_sample": 2728,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0192": {
+      "dataset": "stead",
+      "source_trace_row": 393255,
+      "p_sample": 898,
+      "s_sample": 1270,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0193": {
+      "dataset": "stead",
+      "source_trace_row": 386734,
+      "p_sample": 700,
+      "s_sample": 887,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0194": {
+      "dataset": "stead",
+      "source_trace_row": 1046296,
+      "p_sample": 604,
+      "s_sample": 996,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0195": {
+      "dataset": "stead",
+      "source_trace_row": 412391,
+      "p_sample": 792,
+      "s_sample": 1313,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0196": {
+      "dataset": "stead",
+      "source_trace_row": 572274,
+      "p_sample": 500,
+      "s_sample": 1606,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0197": {
+      "dataset": "stead",
+      "source_trace_row": 526908,
+      "p_sample": 400,
+      "s_sample": 1354,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0198": {
+      "dataset": "stead",
+      "source_trace_row": 1058263,
+      "p_sample": 500,
+      "s_sample": 1810,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0199": {
+      "dataset": "stead",
+      "source_trace_row": 846503,
+      "p_sample": 500,
+      "s_sample": 1500,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0200": {
+      "dataset": "stead",
+      "source_trace_row": 987960,
+      "p_sample": 913,
+      "s_sample": 1284,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0201": {
+      "dataset": "stead",
+      "source_trace_row": 1185658,
+      "p_sample": 592,
+      "s_sample": 1467,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0202": {
+      "dataset": "stead",
+      "source_trace_row": 666897,
+      "p_sample": 600,
+      "s_sample": 1254,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0203": {
+      "dataset": "stead",
+      "source_trace_row": 1037333,
+      "p_sample": 900,
+      "s_sample": 1371,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0204": {
+      "dataset": "stead",
+      "source_trace_row": 540271,
+      "p_sample": 900,
+      "s_sample": 1282,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0205": {
+      "dataset": "stead",
+      "source_trace_row": 482759,
+      "p_sample": 700,
+      "s_sample": 976,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0206": {
+      "dataset": "stead",
+      "source_trace_row": 1138799,
+      "p_sample": 700,
+      "s_sample": 1667,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0207": {
+      "dataset": "stead",
+      "source_trace_row": 1158837,
+      "p_sample": 700,
+      "s_sample": 1740,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0208": {
+      "dataset": "stead",
+      "source_trace_row": 1216120,
+      "p_sample": 769,
+      "s_sample": 1835,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0209": {
+      "dataset": "stead",
+      "source_trace_row": 1008364,
+      "p_sample": 800,
+      "s_sample": 1160,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0210": {
+      "dataset": "stead",
+      "source_trace_row": 620836,
+      "p_sample": 800,
+      "s_sample": 1296,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0211": {
+      "dataset": "stead",
+      "source_trace_row": 989707,
+      "p_sample": 600,
+      "s_sample": 1508,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0212": {
+      "dataset": "stead",
+      "source_trace_row": 303799,
+      "p_sample": 600,
+      "s_sample": 1180,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0213": {
+      "dataset": "stead",
+      "source_trace_row": 369570,
+      "p_sample": 500,
+      "s_sample": 754,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0214": {
+      "dataset": "stead",
+      "source_trace_row": 1186157,
+      "p_sample": 900,
+      "s_sample": 1865,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0215": {
+      "dataset": "stead",
+      "source_trace_row": 924253,
+      "p_sample": 900,
+      "s_sample": 1413,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0216": {
+      "dataset": "stead",
+      "source_trace_row": 1192023,
+      "p_sample": 900,
+      "s_sample": 1693,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0217": {
+      "dataset": "stead",
+      "source_trace_row": 624368,
+      "p_sample": 400,
+      "s_sample": 1064,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0218": {
+      "dataset": "stead",
+      "source_trace_row": 689918,
+      "p_sample": 500,
+      "s_sample": 1209,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0219": {
+      "dataset": "stead",
+      "source_trace_row": 262983,
+      "p_sample": 398,
+      "s_sample": 551,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0220": {
+      "dataset": "stead",
+      "source_trace_row": 765054,
+      "p_sample": 699,
+      "s_sample": 788,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0221": {
+      "dataset": "stead",
+      "source_trace_row": 1120000,
+      "p_sample": 600,
+      "s_sample": 897,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0222": {
+      "dataset": "stead",
+      "source_trace_row": 557178,
+      "p_sample": 799,
+      "s_sample": 970,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0223": {
+      "dataset": "stead",
+      "source_trace_row": 617529,
+      "p_sample": 600,
+      "s_sample": 1547,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0224": {
+      "dataset": "stead",
+      "source_trace_row": 828626,
+      "p_sample": 500,
+      "s_sample": 1454,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0225": {
+      "dataset": "stead",
+      "source_trace_row": 778167,
+      "p_sample": 801,
+      "s_sample": 867,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0226": {
+      "dataset": "stead",
+      "source_trace_row": 548013,
+      "p_sample": 863,
+      "s_sample": 1244,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0227": {
+      "dataset": "stead",
+      "source_trace_row": 880339,
+      "p_sample": 699,
+      "s_sample": 932,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0228": {
+      "dataset": "stead",
+      "source_trace_row": 263076,
+      "p_sample": 700,
+      "s_sample": 1876,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0229": {
+      "dataset": "stead",
+      "source_trace_row": 826840,
+      "p_sample": 900,
+      "s_sample": 1647,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0230": {
+      "dataset": "stead",
+      "source_trace_row": 1087108,
+      "p_sample": 500,
+      "s_sample": 1253,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0231": {
+      "dataset": "stead",
+      "source_trace_row": 269079,
+      "p_sample": 600,
+      "s_sample": 2834,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0232": {
+      "dataset": "stead",
+      "source_trace_row": 933121,
+      "p_sample": 500,
+      "s_sample": 1865,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0233": {
+      "dataset": "stead",
+      "source_trace_row": 1191558,
+      "p_sample": 500,
+      "s_sample": 1402,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0234": {
+      "dataset": "stead",
+      "source_trace_row": 953876,
+      "p_sample": 917,
+      "s_sample": 1568,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0235": {
+      "dataset": "stead",
+      "source_trace_row": 351301,
+      "p_sample": 900,
+      "s_sample": 1139,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0236": {
+      "dataset": "stead",
+      "source_trace_row": 1072796,
+      "p_sample": 400,
+      "s_sample": 1125,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0237": {
+      "dataset": "stead",
+      "source_trace_row": 826645,
+      "p_sample": 600,
+      "s_sample": 1463,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0238": {
+      "dataset": "stead",
+      "source_trace_row": 616342,
+      "p_sample": 400,
+      "s_sample": 1770,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0239": {
+      "dataset": "stead",
+      "source_trace_row": 1245579,
+      "p_sample": 600,
+      "s_sample": 751,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0240": {
+      "dataset": "stead",
+      "source_trace_row": 1064697,
+      "p_sample": 600,
+      "s_sample": 1618,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0241": {
+      "dataset": "stead",
+      "source_trace_row": 874446,
+      "p_sample": 800,
+      "s_sample": 996,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0242": {
+      "dataset": "stead",
+      "source_trace_row": 1131339,
+      "p_sample": 900,
+      "s_sample": 1735,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0243": {
+      "dataset": "stead",
+      "source_trace_row": 866096,
+      "p_sample": 400,
+      "s_sample": 673,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0244": {
+      "dataset": "stead",
+      "source_trace_row": 621497,
+      "p_sample": 900,
+      "s_sample": 2713,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0245": {
+      "dataset": "stead",
+      "source_trace_row": 648496,
+      "p_sample": 600,
+      "s_sample": 1540,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0246": {
+      "dataset": "stead",
+      "source_trace_row": 1166841,
+      "p_sample": 600,
+      "s_sample": 1037,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0247": {
+      "dataset": "stead",
+      "source_trace_row": 988782,
+      "p_sample": 900,
+      "s_sample": 1290,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0248": {
+      "dataset": "stead",
+      "source_trace_row": 805935,
+      "p_sample": 700,
+      "s_sample": 1537,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    },
+    "S0249": {
+      "dataset": "stead",
+      "source_trace_row": 530110,
+      "p_sample": 400,
+      "s_sample": 2170,
+      "sampling_rate": 100.0,
+      "npts": 6000,
+      "t0": "2024-01-01T00:00:00.000000Z"
+    }
+  }
+}
