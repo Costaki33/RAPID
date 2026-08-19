@@ -19,7 +19,10 @@ MODELS: Dict[str, Dict[str, str]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original"},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead"},
     "EQTransformer": {"parent": "EQTransformer", "child": "original"},
-    "EQT-NC": {"parent": "EQTransformer", "child": "nonconservative"},
+    "EQT-NC": {"parent": "EQTransformer", "child": "original_nonconservative"},
+    # SeisBench main: EQCCT is two WaveformModels (P-branch + S-branch).
+    "EQCCTP": {"parent": "EQCCTP", "child": "original"},
+    "EQCCTS": {"parent": "EQCCTS", "child": "original"},
 }
 
 DTYPES = ("fp32", "fp16", "bf16")

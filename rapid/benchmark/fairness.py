@@ -649,15 +649,20 @@ def extract_single_window_picks(
 
 
 def _agg(vals: List[float]) -> Dict[str, float]:
+    import math
     import statistics
 
     if not vals:
         return {}
-    return {
-        "min": float(min(vals)),
-        "mean": float(statistics.mean(vals)),
-        "std": float(statistics.stdev(vals)) if len(vals) > 1 else 0.0,
-    }
+    xs = [float(v) for v in vals]
+    mean = float(statistics.mean(xs))
+    if len(xs) > 1:
+        # Avoid statistics.stdev ExactRatio edge cases with heterogeneous floats.
+        var = sum((x - mean) ** 2 for x in xs) / (len(xs) - 1)
+        std = float(math.sqrt(var))
+    else:
+        std = 0.0
+    return {"min": float(min(xs)), "mean": mean, "std": std}
 
 
 def summarize_timing(repeats: List[Dict[str, Any]]) -> Dict[str, Any]:
