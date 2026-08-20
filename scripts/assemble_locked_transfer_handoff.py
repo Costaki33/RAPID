@@ -26,10 +26,22 @@ def sh(cmd: str) -> str:
 
 
 def load_df() -> pd.DataFrame:
-    csv = RUN / "transfer_summary.csv"
-    if not csv.exists():
-        raise SystemExit(f"missing {csv}; run plot_locked_transfer_results.py first")
-    return pd.read_csv(csv)
+    """Load F1-filled transfer summary; prefer run-dir CSV, fall back to handoff raw_results."""
+    candidates = [
+        RUN / "transfer_summary.csv",
+        OUT / "raw_results" / "transfer_summary.csv",
+        OUT / "data" / "transfer_summary.csv",
+    ]
+    for csv in candidates:
+        if csv.exists():
+            df = pd.read_csv(csv)
+            if "p_f1" not in df.columns or "s_f1" not in df.columns:
+                raise SystemExit(f"{csv} missing p_f1/s_f1; re-run plot_locked_transfer_results.py")
+            return df
+    raise SystemExit(
+        f"missing transfer_summary.csv; tried {candidates}. "
+        "Run plot_locked_transfer_results.py first."
+    )
 
 
 def fmt(x, nd=3):
@@ -57,11 +69,23 @@ def main() -> None:
     prov.mkdir(exist_ok=True)
 
     df = load_df()
+    if len(df) != 152:
+        print(f"WARNING: expected 152 rows, got {len(df)}")
     df.to_csv(data / "transfer_summary.csv", index=False)
 
-    # copy canvas + machine notes
-    src_html = RUN / "figures" / "transfer_canvas.html"
-    if src_html.exists():
+    # copy canvas + machine notes (require canvas so doc links stay valid)
+    html_candidates = [
+        RUN / "figures" / "transfer_canvas.html",
+        OUT / "figures" / "transfer_canvas.html",
+        OUT / "raw_results" / "figures" / "transfer_canvas.html",
+    ]
+    src_html = next((p for p in html_candidates if p.exists() and p.stat().st_size > 0), None)
+    if src_html is None:
+        raise SystemExit(
+            "missing transfer_canvas.html; run plot_locked_transfer_results.py first "
+            f"(looked in {html_candidates})"
+        )
+    if src_html.resolve() != (figs / "transfer_canvas.html").resolve():
         shutil.copy2(src_html, figs / "transfer_canvas.html")
     for name in ("README_machine.txt", "README.md", "LOCKED_VS_ACHIEVED_K.md", "locked_recipe_transfer.log"):
         p = RUN / name
@@ -422,11 +446,18 @@ def main() -> None:
             if p.is_file():
                 shutil.copy2(p, run_handoff / "provenance" / p.name)
 
+    csv_out = data / "transfer_summary.csv"
+    html_out = figs / "transfer_canvas.html"
     print(f"handoff -> {OUT}")
     print(f"HANDOFF.md bytes={handoff.stat().st_size}")
-    print(f"csv rows={len(df)}")
+    print(f"data/transfer_summary.csv bytes={csv_out.stat().st_size} rows={len(df)}")
+    print(f"figures/transfer_canvas.html bytes={html_out.stat().st_size}")
     if "p_f1" in df.columns:
         print(f"p_f1 non-null={df['p_f1'].notna().sum()}  s_f1 non-null={df['s_f1'].notna().sum()}")
+    if not csv_out.exists() or csv_out.stat().st_size == 0:
+        raise SystemExit("data/transfer_summary.csv missing or empty after assemble")
+    if not html_out.exists() or html_out.stat().st_size == 0:
+        raise SystemExit("figures/transfer_canvas.html missing or empty after assemble")
 
 
 if __name__ == "__main__":
