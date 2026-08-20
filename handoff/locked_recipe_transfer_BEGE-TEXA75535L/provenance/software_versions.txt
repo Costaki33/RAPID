@@ -1,0 +1,11 @@
+/home/cgs2528/miniconda3/envs/rapid/lib/python3.10/site-packages/obspy/core/util/base.py:26: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+python 3.10.20
+torch 2.5.1+cu124 cuda 12.4 avail True
+gpu_name NVIDIA GeForce RTX 4050 Laptop GPU
+vram_bytes 6438846464
+bf16 True
+seisbench 0.12.5
+ray 2.42.1
+numpy 1.26.4
+obspy 1.4.1
