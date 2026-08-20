@@ -28,7 +28,7 @@ N_STATIONS="${N_STATIONS:-580}"
 REPEATS="${REPEATS:-}"
 N_FEEDS="${N_FEEDS:-8}"
 CPU_GRID="${CPU_GRID:-}"           # e.g. "5 10" or "5 10 15 20"
-GPU_ACTOR_CAP="${GPU_ACTOR_CAP:-2}"
+GPU_ACTOR_CAP="${GPU_ACTOR_CAP:-}"
 CPU_ACTOR_CAP="${CPU_ACTOR_CAP:-10}"
 MODELS_CSV="${MODELS_CSV:-}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
@@ -39,6 +39,23 @@ mkdir -p "$RESULTS_ROOT" "$(dirname "$LOG")"
 
 note() { echo "=== $(date -Ins)  $* ===" | tee -a "$LOG"; }
 die()  { echo "ERROR: $*" | tee -a "$LOG" >&2; exit 1; }
+
+# Auto-size GPU actor pool from NVML total VRAM when the operator did not override.
+# Runbook default (2) assumes ~8 GB; 6 GB laptop GPUs (e.g. RTX 4050) need cap=1.
+if [[ -z "$GPU_ACTOR_CAP" ]]; then
+  GPU_ACTOR_CAP=2
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    vram_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+    if [[ -n "${vram_mib:-}" && "$vram_mib" =~ ^[0-9]+$ ]]; then
+      if (( vram_mib < 7000 )); then
+        GPU_ACTOR_CAP=1
+        note "auto GPU_ACTOR_CAP=1 (detected ${vram_mib} MiB VRAM; <7000 MiB laptop GPU)"
+      else
+        note "auto GPU_ACTOR_CAP=2 (detected ${vram_mib} MiB VRAM)"
+      fi
+    fi
+  fi
+fi
 
 [[ -n "$CORES" ]] || die "Set CORES to an explicit affinity list before running (see docs/XPS_AI_RUNBOOK.md)."
 

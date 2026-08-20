@@ -46,7 +46,8 @@ obspy 1.4.1
 
 | Note | Detail |
 |---|---|
-| SeisBench | Upgraded mid-campaign from **0.10.2 → 0.12.5** so `EQCCTP`/`EQCCTS` exist; early EQCCT native failures were from missing attributes, not model physics |
+| SeisBench (this laptop) | **0.12.5** (upgraded mid-campaign from 0.10.2 so `EQCCTP`/`EQCCTS` exist) |
+| SeisBench (workstation / original-data lock) | **0.11.8** — version differ; catalog F1 still matches workstation picks |
 | RAPID git | see `provenance/host_snapshot.txt` |
 | Networks | Repo-provided `data/seisbench_networks/stead_250st` and `stead_580st` (same trees as workstation transfer; do not rebuild with a new seed if F1 must match) |
 
@@ -65,7 +66,9 @@ obspy 1.4.1
 Models: **EQCCT, PhaseNet, PhaseNetLight, EQTransformer, EQT-NC**.
 Networks: STEAD **250** and **580**.
 Devices: **CPU** and **1× GPU**.
-Core grid: **5, 10, 15, 20**.
+Native core grid: **5, 10, 15, 20** (80 native cells complete).
+Orch unique K coverage (this package): **CPU K=5 / 10 / 20**; **GPU K=4** (+ PhaseNet@250 **K=2**).
+**Intentionally skipped:** CPU orch **K=15** (bracketed by K=10 and K=20; do not run).
 Repeats: **5** (smoke used 1 earlier; final package is the full run).
 
 ### Locked worker counts K (workstation) vs achieved on this laptop
@@ -81,22 +84,27 @@ K = min(locked_want, n_cpus, CPU_K_CAP or GPU_K_CAP)
 | CPU @ 580 / EQCCT | **K=20** | **K=20** after uncapped re-run (was K≤10 with `CPU_K_CAP=10`) |
 | CPU @ 250 others | **K=10** | **K=5** at cpus=5; **K=10** at cpus≥10 |
 
-**Affinity:** `CORES=0,1,2,...,19` (all 20 logical CPUs) so 15/20 core-grid cells were not skipped for missing IDs.
+**Affinity:** `CORES=0,1,2,...,19` (all 20 logical CPUs) so native 15/20 core-grid cells were not skipped for missing IDs.
 
 **Important about SKIP lines in the log:** orchestration result paths are keyed by **K** (`kma{K}/...`), not by `n_cpus`.
 Once a successful `kma4` (or `kma2` / `kma20`) file exists, matrix rows for other `n_cpus` with the same K are logged as SKIP (duplicate path).
-Those are **not** missing locked configs.
+Those are **not** missing locked configs — skip duplicate `n_cpus` rows that share the same K path.
 
-**CPU K=20 follow-up:** `scripts/rerun_cpu_orch_k20.sh` unsets `CPU_K_CAP` and runs `CORE_GRID=20` for playback+staggered CPU. Disclose RAM/WSL risk; OOM fallback is `CPU_K_CAP=15` only.
+**CPU K=20 follow-up:** first matrix used `CPU_K_CAP=10`; then `scripts/rerun_cpu_orch_k20.sh` unset the cap for locked comparison at K=20.
+Peak process set size (PSS) on this box was ~**9–11 GB** at K=20 — a laptop / hybrid-CPU / WSL result.
+On this host, CPU **K=20 is often worse than K=10** for staggered p95; that is **not** a reason to change the workstation lock.
 
 ### Caps / conditions the paper must disclose
 
-1. **`CPU_K_CAP`** — initial campaign used **10**; K=20 re-run unsets the cap for locked comparison (disclose RAM risk / any OOM fallback).
-2. **`GPU_K_CAP=4`** on the successful GPU orch re-run — matches locked GPU K (6 GB VRAM was enough; an earlier attempt used K=2 then results were cleared and re-run at K=4).
-3. **Absolute times will be slower** than Threadripper + RTX 6000 Ada; claim **within-machine ordering**, not absolute equality.
-4. Staggered **makespan ~90 s** is expected (simulated delay ceiling); rank **p95 finish−ready**, not makespan.
-5. EQCCT is SeisBench **`EQCCTP` + `EQCCTS`**, not a single WaveformModel / not TF EQCCTPro for this suite.
-6. Do **not** treat SKIP-duplicate orch rows as failures or as a reason to change the locked recipe.
+1. **SeisBench 0.12.5** on this laptop vs workstation **0.11.8**.
+2. **WSL memory cap 24 GB**; GPU is **RTX 4050 Laptop 6 GB**.
+3. **Caps story:** first matrix with **`CPU_K_CAP=10`**, then uncapped **K=20** follow-up for locked comparison; **`GPU_K_CAP=4`** (PhaseNet@250 → K=2).
+4. **Do not** recommend changing the workstation lock because of K=20 laptop results.
+5. Unique orch coverage: CPU K=5/10/20, GPU K=4 (+ PhaseNet 250 K=2); SKIP duplicate `n_cpus` rows that share the same K path; intentionally skip CPU K=15.
+6. **Absolute times will be slower** than Threadripper + RTX 6000 Ada; claim **within-machine ordering**, not absolute equality (e.g. native EQCCT CPU ~47 s here vs ~1.41 s on workstation).
+7. Staggered **makespan ~90 s** is expected (simulated delay ceiling); rank **p95 finish−ready** (GPU staggered p95 is **0.2–1.4 s** here — not makespan, not wait-5).
+8. EQCCT is SeisBench **`EQCCTP` + `EQCCTS`**, not a single WaveformModel / not TF EQCCTPro for this suite.
+9. This laptop package is enough for the transfer question: locked recipes still work, GPU stays the fast path, catalog picks match workstation.
 
 ---
 
@@ -104,11 +112,12 @@ Those are **not** missing locked configs.
 
 | Artifact | Path in this handoff |
 |---|---|
-| Tidy table | `data/transfer_summary.csv` |
+| Tidy table (with catalog P/S F1) | `data/transfer_summary.csv` |
 | Interactive plots | `figures/transfer_canvas.html` |
-| Full raw `result.json` tree | on the machine under `~/RAPID/results/locked_recipe_transfer/BEGE-TEXA75535L_2026-08-19/` (too large to duplicate here; CSV is the analysis extract) |
+| Full raw `result.json` tree | `raw_results/` (152 successful cells; also under WSL `~/RAPID/results/locked_recipe_transfer/BEGE-TEXA75535L_2026-08-19/`) |
 | Run log | `provenance/locked_recipe_transfer.log` |
 | Caps note | `provenance/LOCKED_VS_ACHIEVED_K.md` / this document |
+| Index | `README.md` |
 
 ### Successful cells in CSV
 
@@ -121,7 +130,11 @@ playback   cpu       26
 staggered  cpu       26
            gpu       10
 total_rows=152
+success_rate_1.0_rows=152
+failures=0
 ```
+
+**152** successful `result.json` rows in this package; **all** have `success_rate=1.0`; **zero** failures; native **80** cells complete.
 
 Metrics encoded in `runtime_s` / `metric`:
 
@@ -131,6 +144,9 @@ Metrics encoded in `runtime_s` / `metric`:
 | playback | `orch.makespan_s_mean` |
 | staggered | `latency.pooled_across_repeats.e2e_finish_minus_ready.p95` |
 
+Catalog quality columns: `p_f1` / `s_f1` from `pick_quality_vs_catalog` (`P.f1_mean` / `S.f1_mean`).
+Expected workstation catalog picks (examples): EQCCT ~**0.905 / 0.946**, PhaseNet ~**0.974 / 0.937**.
+
 ---
 
 ## 4. Paper-facing numbers (this laptop)
@@ -139,48 +155,48 @@ Metrics encoded in `runtime_s` / `metric`:
 
 Prefer the fastest core cell that is quality-safe; table below lists **cpus=20** (full grid available) and GPU at cpus=20.
 
-| Model | Stations | CPU cpus20 | GPU |
-|---|---:|---:|---:|
-| EQCCT | 250 | 22.792 | 0.733 |
-| EQCCT | 580 | 47.215 | 1.650 |
-| PhaseNet | 250 | 0.988 | 0.376 |
-| PhaseNet | 580 | 2.380 | 0.944 |
-| PhaseNetLight | 250 | 0.419 | 0.340 |
-| PhaseNetLight | 580 | 1.032 | 0.826 |
-| EQTransformer | 250 | 3.724 | 0.621 |
-| EQTransformer | 580 | 8.384 | 1.312 |
-| EQT-NC | 250 | 3.650 | 0.488 |
-| EQT-NC | 580 | 8.771 | 1.063 |
+| Model | Stations | CPU cpus20 | GPU | P F1 | S F1 |
+|---|---:|---:|---:|---:|---:|
+| EQCCT | 250 | 22.792 | 0.733 | 0.8979 | 0.9424 |
+| EQCCT | 580 | 47.215 | 1.650 | 0.9052 | 0.9464 |
+| PhaseNet | 250 | 0.988 | 0.376 | 0.9641 | 0.9336 |
+| PhaseNet | 580 | 2.380 | 0.944 | 0.9743 | 0.9365 |
+| PhaseNetLight | 250 | 0.419 | 0.340 | 0.9409 | 0.9438 |
+| PhaseNetLight | 580 | 1.032 | 0.826 | 0.9582 | 0.9445 |
+| EQTransformer | 250 | 3.724 | 0.621 | 0.9064 | 0.9608 |
+| EQTransformer | 580 | 8.384 | 1.312 | 0.9143 | 0.9656 |
+| EQT-NC | 250 | 3.650 | 0.488 | 0.9083 | 0.9630 |
+| EQT-NC | 580 | 8.771 | 1.063 | 0.9143 | 0.9639 |
 
 ### 4b. Playback MA SG — makespan (s) at achieved K
 
-| Model | Stations | CPU K=5 | CPU K=10 | GPU K | GPU makespan |
-|---|---:|---:|---:|---:|---:|
-| EQCCT | 250 | 15.743 | 10.445 | 4 | 0.651 |
-| EQCCT | 580 | 36.921 | 24.489 | 4 | 1.262 |
-| PhaseNet | 250 | 1.681 | 0.997 | 2 | 0.347 |
-| PhaseNet | 580 | 3.357 | 2.377 | 4 | 0.442 |
-| PhaseNetLight | 250 | 0.379 | 0.271 | 4 | 0.241 |
-| PhaseNetLight | 580 | 0.794 | 0.559 | 4 | 0.389 |
-| EQTransformer | 250 | 4.872 | 3.236 | 4 | 0.989 |
-| EQTransformer | 580 | 11.482 | 7.659 | 4 | 1.436 |
-| EQT-NC | 250 | 4.897 | 3.121 | 4 | 0.693 |
-| EQT-NC | 580 | 11.751 | 7.493 | 4 | 1.178 |
+| Model | Stations | CPU K=5 | CPU K=10 | CPU K=20 | GPU K | GPU makespan |
+|---|---:|---:|---:|---:|---:|---:|
+| EQCCT | 250 | 15.743 | 10.445 | 11.196 | 4 | 0.651 |
+| EQCCT | 580 | 36.921 | 24.489 | 26.204 | 4 | 1.262 |
+| PhaseNet | 250 | 1.681 | 0.997 | — | 2 | 0.347 |
+| PhaseNet | 580 | 3.357 | 2.377 | 2.289 | 4 | 0.442 |
+| PhaseNetLight | 250 | 0.379 | 0.271 | — | 4 | 0.241 |
+| PhaseNetLight | 580 | 0.794 | 0.559 | 0.571 | 4 | 0.389 |
+| EQTransformer | 250 | 4.872 | 3.236 | — | 4 | 0.989 |
+| EQTransformer | 580 | 11.482 | 7.659 | 6.803 | 4 | 1.436 |
+| EQT-NC | 250 | 4.897 | 3.121 | — | 4 | 0.693 |
+| EQT-NC | 580 | 11.751 | 7.493 | 7.133 | 4 | 1.178 |
 
 ### 4c. Staggered MA SG eager — p95 finish−ready (s)
 
-| Model | Stations | CPU K=5 | CPU K=10 | GPU K | GPU p95 |
-|---|---:|---:|---:|---:|---:|
-| EQCCT | 250 | 14.440 | 9.407 | 4 | 0.681 |
-| EQCCT | 580 | 36.729 | 24.442 | 4 | 1.230 |
-| PhaseNet | 250 | 1.608 | 1.096 | 2 | 0.337 |
-| PhaseNet | 580 | 3.140 | 2.308 | 4 | 0.431 |
-| PhaseNetLight | 250 | 0.410 | 0.289 | 4 | 0.226 |
-| PhaseNetLight | 580 | 0.895 | 0.558 | 4 | 0.379 |
-| EQTransformer | 250 | 5.099 | 3.587 | 4 | 1.032 |
-| EQTransformer | 580 | 11.940 | 7.156 | 4 | 1.387 |
-| EQT-NC | 250 | 4.404 | 2.924 | 4 | 0.700 |
-| EQT-NC | 580 | 11.525 | 6.790 | 4 | 1.129 |
+| Model | Stations | CPU K=5 | CPU K=10 | CPU K=20 | GPU K | GPU p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| EQCCT | 250 | 14.440 | 9.407 | 8.617 | 4 | 0.681 |
+| EQCCT | 580 | 36.729 | 24.442 | 34.430 | 4 | 1.230 |
+| PhaseNet | 250 | 1.608 | 1.096 | — | 2 | 0.337 |
+| PhaseNet | 580 | 3.140 | 2.308 | 2.345 | 4 | 0.431 |
+| PhaseNetLight | 250 | 0.410 | 0.289 | — | 4 | 0.226 |
+| PhaseNetLight | 580 | 0.895 | 0.558 | 0.730 | 4 | 0.379 |
+| EQTransformer | 250 | 5.099 | 3.587 | — | 4 | 1.032 |
+| EQTransformer | 580 | 11.940 | 7.156 | 9.550 | 4 | 1.387 |
+| EQT-NC | 250 | 4.404 | 2.924 | — | 4 | 0.700 |
+| EQT-NC | 580 | 11.525 | 6.790 | 8.476 | 4 | 1.129 |
 
 ### 4d. Workstation reference (580) — order-of-magnitude only
 
@@ -200,11 +216,12 @@ From `docs/RAPID_LOCKED_RECIPE_TRANSFER.md` (Threadripper + RTX 6000 Ada). **Do 
 
 Use these as qualitative checks against the handoff brief:
 
-1. **GPU ≪ CPU** for native EQCCT/EQT-family on this laptop (large CPU native times for EQCCT ~47 s at 580/20 vs ~1.65 s GPU).
-2. **Playback / staggered GPU** at locked K=4 stays sub-second to ~1.4 s makespan/p95 for 580 — still far below wait-5 (~5 s) territory for staggered p95.
-3. **CPU orch K=10 beats K=5** consistently (actor parallelism helps under the cap).
+1. **GPU ≪ CPU** for heavy models on this laptop (e.g. native EQCCT 580/cpus20 ~**47 s** CPU vs ~**1.65 s** GPU; workstation native EQCCT CPU is ~**1.41 s** — report **ordering**, not equality).
+2. **Staggered GPU p95** at locked K is **0.2–1.4 s** — that is finish−ready latency, **not** makespan (~90 s) and **not** wait-5.
+3. **CPU orch K=10 beats K=5**; on this box **K=20 is often worse than K=10** for staggered — laptop/hybrid-CPU result; **do not** change the workstation lock.
 4. **PhaseNetLight** remains the fastest native/CPU-orch path among the five on this host.
-5. Absolute gap vs workstation is large (consumer GPU + hybrid CPU + WSL); keep claims comparative within this host and vs locked recipe *shape*.
+5. Catalog P/S F1 matches workstation picks (EQCCT ~0.905/0.946, PhaseNet ~0.974/0.937).
+6. This package answers the transfer question: locked recipes still work; GPU stays the fast path.
 
 ---
 
@@ -212,32 +229,39 @@ Use these as qualitative checks against the handoff brief:
 
 1. Initial zip install had no git; later synced to `origin/main` (networks committed in-repo).
 2. First XPS-style `CORES=0,2,4,...,18` (10 IDs) skipped 15/20 cells; fixed to full `0..19`.
-3. SeisBench 0.10.2 lacked `EQCCTP`; upgraded to **0.12.5** before EQCCT succeeded.
+3. SeisBench 0.10.2 lacked `EQCCTP`; upgraded to **0.12.5** before EQCCT succeeded (workstation lock used **0.11.8**).
 4. First GPU orch pass used `GPU_K_CAP=2`; those trees were cleared and **re-run at `GPU_K_CAP=4`** (locked).
-5. Long runs must avoid Windows sleep; WSL suspends with the host.
-6. Full raw results live on this disk under WSL `~/RAPID/...`; copy off-machine before returning the laptop if raw JSON is needed.
+5. First CPU orch matrix used `CPU_K_CAP=10`; K=20 follow-up unset the cap (peak PSS ~9–11 GB). Intentionally **no** CPU K=15 orch.
+6. Long runs must avoid Windows sleep; WSL suspends with the host.
+7. This handoff folder is self-contained (`data/`, `figures/`, `raw_results/`, `provenance/`); WSL source also under `~/RAPID/results/locked_recipe_transfer/BEGE-TEXA75535L_2026-08-19/`.
 
 ---
 
-## 7. How to regenerate plots
+## 7. How to regenerate plots / handoff
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate rapid
-cd ~/RAPID
+cd ~/RAPID   # or /mnt/c/Users/cgs2528/Projects/RAPID
 python scripts/plot_locked_transfer_results.py
+python scripts/assemble_locked_transfer_handoff.py
 ```
+
+Plots write under `~/RAPID/results/locked_recipe_transfer/BEGE-TEXA75535L_2026-08-19/`; assemble copies CSV + `figures/transfer_canvas.html` into this handoff folder.
 
 ---
 
 ## 8. Recommended paper wording
 
 > We transferred the locked Annotate bf16 / Model-Actor SG recipes to a consumer laptop
-> (Intel i7-13700H, RTX 4050 6 GB, WSL2). Native cells used the 5–20 logical-CPU grid.
-> GPU Model-Actor used the locked worker count K=4 (K=2 for PhaseNet at 250 stations).
-> CPU Model-Actor initially used K≤10 (`CPU_K_CAP=10`); a follow-up unset the cap to compare at
-> workstation K=20 for 580 stations and EQCCT@250 (disclose RAM/WSL risk if any cell OOM’d).
-> We report within-machine method ordering and do not equate absolute latencies to the workstation.
+> (Intel i7-13700H, RTX 4050 Laptop 6 GB, WSL2 capped at 24 GB; SeisBench 0.12.5 vs workstation 0.11.8).
+> Native cells used the 5–20 logical-CPU grid (80 cells). GPU Model-Actor used locked K=4
+> (K=2 for PhaseNet at 250 stations). CPU Model-Actor first used K≤10 (`CPU_K_CAP=10`), then an
+> uncapped K=20 follow-up for locked comparison (peak PSS ~9–11 GB; K=20 often slower than K=10
+> for staggered on this hybrid CPU — we do not change the workstation lock). Unique orch coverage
+> is CPU K=5/10/20 and GPU K=4; CPU K=15 was intentionally skipped. Catalog P/S F1 matched
+> workstation picks. We report within-machine method ordering (GPU ≪ CPU for heavy models;
+> staggered GPU p95 0.2–1.4 s) and do not equate absolute latencies to the workstation.
 
 ---
 
-Assembled: 2026-08-20T17:04:20.398643+00:00
+Assembled: 2026-08-20T17:24:46.800388+00:00
