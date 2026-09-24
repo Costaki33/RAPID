@@ -23,6 +23,7 @@ strategy. Schema version 2 is emitted by :func:`build_result`.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -360,7 +361,20 @@ SCHEMA_VERSION = 3
 # ---------------------------------------------------------------------------
 
 
-def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
+def threads_from_multiplier(n_cpus: int, mult: float) -> int:
+    """Map a core-relative thread multiplier to an integer intra-op budget.
+
+    Uses round-half-up (``floor(mult * n_cpus + 0.5)``), minimum 1. Python 3
+    ``round()`` is banker's rounding and would turn 2.5 into 2.
+    """
+    return max(1, int(math.floor(float(mult) * int(n_cpus) + 0.5)))
+
+
+def pin_threads(
+    n_cpus: int,
+    torch_threads: Optional[int] = None,
+    interop_threads: Optional[int] = None,
+) -> None:
     """Cap every compute library to ``n_cpus`` threads to match the affinity mask.
 
     Sets the standard OpenMP/BLAS env vars AND, crucially, ``torch`` intra-op and
@@ -377,6 +391,11 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
     and is catastrophic for per-station classify(), so the optimal single-process
     config is well below the core count.
 
+    ``interop_threads`` is a separate pool (independent graph ops). ``None``
+    keeps the historical behaviour of copying the intra-op budget. The native
+    annotate config sweep passes ``1`` so intra-op is the only parallelism lever
+    and the two pools do not fight for the same cores.
+
     ``torch_threads == 0`` is a sentinel meaning "leave every library at its
     out-of-the-box default" -- we set nothing, so torch uses its native intra-op
     default (the machine's physical-core count) exactly as a user calling
@@ -389,6 +408,7 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
     n = max(1, int(n_cpus))
     if torch_threads is not None:
         n = max(1, int(torch_threads))
+    inter = n if interop_threads is None else max(1, int(interop_threads))
     for key in (
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
@@ -396,9 +416,9 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
         "NUMEXPR_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
         "TF_NUM_INTRAOP_THREADS",
-        "TF_NUM_INTEROP_THREADS",
     ):
         os.environ[key] = str(n)
+    os.environ["TF_NUM_INTEROP_THREADS"] = str(inter)
 
     try:
         import torch
@@ -407,7 +427,7 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
         # set_num_interop_threads can only be set before any inter-op work and
         # only once; ignore if torch has already started its pool.
         try:
-            torch.set_num_interop_threads(n)
+            torch.set_num_interop_threads(inter)
         except RuntimeError:
             pass
     except Exception:
@@ -421,7 +441,7 @@ def pin_threads(n_cpus: int, torch_threads: Optional[int] = None) -> None:
         try:
             tf = sys.modules["tensorflow"]
             tf.config.threading.set_intra_op_parallelism_threads(n)
-            tf.config.threading.set_inter_op_parallelism_threads(n)
+            tf.config.threading.set_inter_op_parallelism_threads(inter)
         except Exception:
             pass
 

@@ -2998,8 +2998,8 @@ class ModelActor:
     def predict_station_group(self, station_streams, preprocess_args):
         """Process a group of (station, ObsPy Stream) items inside one actor.
 
-        Station-group dispatch (SCMLPick-style): one remote call per actor share,
-        with EQCCT preprocess + predict + pick extraction for each station.
+        Station-group dispatch 
+        redict + pick extraction for each station.
         Returns {station: {"p": [samples], "s": [samples]}}.
         """
         from rapid.orchestration.models.eqcct_tf_models import PreLoadGeneratorTest

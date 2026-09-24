@@ -56,6 +56,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
             {"parent": "EQCCTS", "child": "original"},
         ],
     },
+    "EQCCTP": {"parent": "EQCCTP", "child": "original", "branches": None},
 }
 
 METHODS = ("annotate_fp32", "annotate_bf16")
@@ -161,24 +162,77 @@ def _batch_for(dtype: str, override: int) -> int:
     return int(BEST_BATCH[dtype])
 
 
+def torch_threads_of(args) -> int:
+    tt = getattr(args, "torch_threads", None)
+    if tt is None:
+        return 1
+    return max(1, int(tt))
+
+
+def orch_cell_dir(
+    root: Path,
+    cell: Dict[str, Any],
+    *,
+    n_cpus: int,
+    tag: str,
+    batch_size: int,
+    torch_threads: Optional[int] = None,
+    winner_paths: bool = False,
+) -> Path:
+    """Result directory. ``cpusN`` is inserted when N != 20 so the original
+    20-core suite under ``stead_2026-08-14`` keeps its existing paths.
+
+    ``winner_paths`` always includes ``cpusN`` and ``thrT`` so native-T (stage A)
+    and 1-thread-per-worker (stage B) cells cannot collide.
+    """
+    p = (
+        Path(root)
+        / cell["composition"]
+        / cell["method"]
+        / "stead"
+        / f"{cell['n_stations']}st"
+        / cell["model"]
+        / cell["device"]
+    )
+    if winner_paths or int(n_cpus) != 20:
+        p = p / f"cpus{int(n_cpus)}"
+    p = (
+        p
+        / f"kma{cell['k_ma']}_krp{cell['k_rp']}"
+        / cell["packaging"]
+        / cell["arrival"]
+        / cell["fill"]
+        / f"bs{int(batch_size)}"
+    )
+    if winner_paths:
+        p = p / f"thr{int(torch_threads if torch_threads is not None else 1)}"
+    return p / tag
+
+
 def _out_dir(args) -> Path:
     dtype = DTYPE_OF[args.method]
     bs = _batch_for(dtype, args.batch_size)
     kma, krp = k_split(args)
-    return (
-        args.results_root
-        / composition_of(args)
-        / args.method
-        / "stead"
-        / f"{args.n_stations}st"
-        / args.model
-        / args.device
-        / f"kma{kma}_krp{krp}"
-        / args.packaging
-        / args.arrival
-        / fill_of(args)
-        / f"bs{bs}"
-        / args.tag
+    cell = {
+        "composition": composition_of(args),
+        "method": args.method,
+        "n_stations": args.n_stations,
+        "model": args.model,
+        "device": args.device,
+        "k_ma": kma,
+        "k_rp": krp,
+        "packaging": args.packaging,
+        "arrival": args.arrival,
+        "fill": fill_of(args),
+    }
+    return orch_cell_dir(
+        args.results_root,
+        cell,
+        n_cpus=args.n_cpus,
+        tag=args.tag,
+        batch_size=bs,
+        torch_threads=torch_threads_of(args),
+        winner_paths=bool(getattr(args, "winner_paths", False)),
     )
 
 
@@ -315,6 +369,7 @@ def _submit_one(
         cls_kw["P_threshold"],
         cls_kw["S_threshold"],
         cls_kw["Detection_threshold"],
+        cls_kw.get("_torch_threads", 1),
     )
 
 
@@ -334,6 +389,7 @@ def run_one_repeat(args) -> int:
     n_eff = _set_affinity(core_list)
     dtype = DTYPE_OF[args.method]
     batch_size = _batch_for(dtype, args.batch_size)
+    tt = torch_threads_of(args)
     in_samples, overlap_samples = _window_spec(args.model)
     net_dir = _net_dir(args.net_root, args.n_stations)
     kma, krp = k_split(args)
@@ -373,8 +429,9 @@ def run_one_repeat(args) -> int:
         interval_s=0.25,
     ).start()
 
-    # One thread per instance; Ray workers inherit this.
-    pin_threads(n_eff, torch_threads=1)
+    # Intra-op budget per instance. Stage A copies the native winner T at K=1;
+    # K>1 stays at 1 thread/worker. Ray workers inherit the env; actors also pin.
+    pin_threads(n_eff, torch_threads=tt, interop_threads=1)
     for key in (
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
@@ -382,7 +439,7 @@ def run_one_repeat(args) -> int:
         "NUMEXPR_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
     ):
-        os.environ[key] = "1"
+        os.environ[key] = str(tt)
 
     ok = True
     err = ""
@@ -421,6 +478,7 @@ def run_one_repeat(args) -> int:
                             annotate_batch_size=batch_size,
                             overlap_samples=overlap_samples,
                             gpus_to_use=([0] if gpu else False),
+                            torch_threads=tt,
                         )
                     )
                 else:
@@ -432,6 +490,7 @@ def run_one_repeat(args) -> int:
                             annotate_batch_size=batch_size,
                             overlap_samples=overlap_samples,
                             gpus_to_use=False,
+                            torch_threads=tt,
                         )
                     )
             return out
@@ -457,6 +516,7 @@ def run_one_repeat(args) -> int:
             _dtype=dtype,
             _batch_size=batch_size,
             _overlap=overlap_samples,
+            _torch_threads=tt,
         )
 
         comp = composition_of(args)
@@ -663,6 +723,7 @@ def _worker_env(args, gpu: bool) -> Dict[str, str]:
             env["LD_LIBRARY_PATH"] = cudnn + ((":" + prev) if prev else "")
     else:
         env["CUDA_VISIBLE_DEVICES"] = ""
+    tt = torch_threads_of(args)
     for key in (
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
@@ -670,7 +731,7 @@ def _worker_env(args, gpu: bool) -> Dict[str, str]:
         "NUMEXPR_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
     ):
-        env[key] = "1"
+        env[key] = str(tt)
     return env
 
 
@@ -734,8 +795,11 @@ def _worker_argv(args, repeat_index: int) -> List[str]:
         str(getattr(args, "chunk_s", CHUNK_S)),
         "--repeat-index",
         str(repeat_index),
+        "--torch-threads",
+        str(torch_threads_of(args)),
     ]
-    return argv
+    if bool(getattr(args, "winner_paths", False)):
+        argv.append("--winner-paths")
     return argv
 
 
@@ -882,7 +946,7 @@ def run_driver(args) -> int:
         fill=fill_of(args),
         group_size=group_size(args.n_stations, max(1, kma + krp), args.packaging),
         batch_size=bs,
-        batch_size_source="merged_study_best" if args.batch_size <= 0 else "override",
+        batch_size_source="merged_study_best" if args.batch_size <= 0 else "native_winner",
         best_batch_table=BEST_BATCH,
         in_samples=in_samples,
         overlap_samples=overlap_samples,
@@ -893,7 +957,8 @@ def run_driver(args) -> int:
         delay_choices_s=list(DELAY_CHOICES_S),
         chunk_s=float(getattr(args, "chunk_s", CHUNK_S) or CHUNK_S),
         max_wait_s=max_wait_of(fill_of(args)),
-        torch_threads=1,
+        torch_threads=torch_threads_of(args),
+        winner_paths=bool(getattr(args, "winner_paths", False)),
         pick_extractor="seisbench_classify_aggregate_in_actor",
         p_threshold=args.p_threshold,
         s_threshold=args.s_threshold,
@@ -1076,6 +1141,24 @@ def iter_matrix(
                                             yield cell
 
 
+CORE_BUDGETS = (5, 10, 15)
+
+
+def iter_core_budget_matrix(n_cpus: int, **kwargs):
+    """Same orch matrix as ``iter_matrix``, dropping cells with K > n_cpus.
+
+    GPU K ladders are unchanged from the 20-core suite (MA 1/2/4, Ripper 1/2)
+    except that K still cannot exceed the host-core budget.
+    """
+    n_cpus = int(n_cpus)
+    for cell in iter_matrix(**kwargs):
+        if int(cell["k_ma"]) + int(cell["k_rp"]) > n_cpus:
+            continue
+        out = dict(cell)
+        out["n_cpus"] = n_cpus
+        yield out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1122,6 +1205,17 @@ def main() -> int:
         type=int,
         default=0,
         help="0 = locked best from merged study (fp32/bf16=512).",
+    )
+    ap.add_argument(
+        "--torch-threads",
+        type=int,
+        default=None,
+        help="Intra-op / BLAS threads per worker (default 1).",
+    )
+    ap.add_argument(
+        "--winner-paths",
+        action="store_true",
+        help="Always include cpusN and thrT in the result path (native-winner campaign).",
     )
     ap.add_argument("--gpu-id", type=int, default=0)
     ap.add_argument("--repeats", type=int, default=5)

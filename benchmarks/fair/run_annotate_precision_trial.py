@@ -10,6 +10,9 @@ already written ``picks.json``.
 EQCCT (SeisBench main) is the dual-branch pair ``EQCCTP`` + ``EQCCTS``: both
 branches are annotated sequentially; wall time is the sum of both annotate
 calls; picks are the union of each branch's ``classify_aggregate`` output.
+
+``EQCCTP`` as a logical model loads and runs only the P branch (early-warning
+stand-in). Catalog S F1 is expected to be near zero for that model.
 """
 
 from __future__ import annotations
@@ -28,7 +31,12 @@ if str(RAPID_ROOT) not in sys.path:
     sys.path.insert(0, str(RAPID_ROOT))
 
 from rapid.benchmark import fairness  # noqa: E402
-from rapid.benchmark.fairness import StageTimes, build_result, pin_threads  # noqa: E402
+from rapid.benchmark.fairness import (  # noqa: E402
+    StageTimes,
+    build_result,
+    pin_threads,
+    threads_from_multiplier,
+)
 from rapid.benchmark.pick_quality import (  # noqa: E402
     catalog_from_manifest_stations,
     compare_pick_sets,
@@ -36,6 +44,7 @@ from rapid.benchmark.pick_quality import (  # noqa: E402
 )
 
 # Logical study models. EQCCT expands to EQCCTP + EQCCTS at load time.
+# EQCCTP is a first-class P-only model (one branch, one annotate() call).
 MODELS: Dict[str, Dict[str, Any]] = {
     "PhaseNet": {"parent": "PhaseNet", "child": "original", "branches": None},
     "PhaseNetLight": {"parent": "PhaseNetLight", "child": "stead", "branches": None},
@@ -53,6 +62,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
             {"parent": "EQCCTS", "child": "original"},
         ],
     },
+    "EQCCTP": {"parent": "EQCCTP", "child": "original", "branches": None},
 }
 
 METHODS = ("annotate_fp32", "annotate_bf16", "annotate_fp16")
@@ -62,6 +72,61 @@ DTYPE_OF = {
     "annotate_bf16": "bf16",
     "annotate_fp16": "fp16",
 }
+
+# Native config-sweep grids (isolation launcher + watch script).
+CONFIG_THREAD_MULTS: Tuple[float, ...] = (0.25, 0.5, 1.0, 1.5, 2.0)
+CONFIG_CPU_GRID: Tuple[int, ...] = (5, 10, 15, 20)
+CONFIG_BATCH_GRID: Tuple[int, ...] = (64, 128, 256, 512)
+CONFIG_PACKAGINGS: Tuple[str, ...] = ("merged", "sequential")
+CONFIG_STATIONS: Tuple[int, ...] = (250, 580)
+CONFIG_DEVICES: Tuple[str, ...] = ("cpu", "gpu")
+CONFIG_INTEROP_THREADS = 1
+CONFIG_TAG = "ann_cfg"
+
+
+def iter_config_matrix():
+    """Yield every native annotate-config cell (EQT/EQT-NC fp16 skipped)."""
+    for n_stations in CONFIG_STATIONS:
+        for method in METHODS:
+            for model in MODELS:
+                if method == "annotate_fp16" and model in EQT_MODELS:
+                    continue
+                for packaging in CONFIG_PACKAGINGS:
+                    for device in CONFIG_DEVICES:
+                        for n_cpus in CONFIG_CPU_GRID:
+                            for thread_mult in CONFIG_THREAD_MULTS:
+                                for batch_size in CONFIG_BATCH_GRID:
+                                    yield {
+                                        "method": method,
+                                        "model": model,
+                                        "n_stations": n_stations,
+                                        "packaging": packaging,
+                                        "device": device,
+                                        "n_cpus": n_cpus,
+                                        "thread_mult": thread_mult,
+                                        "torch_threads": threads_from_multiplier(
+                                            n_cpus, thread_mult
+                                        ),
+                                        "batch_size": batch_size,
+                                        "interop_threads": CONFIG_INTEROP_THREADS,
+                                    }
+
+
+def config_result_relpath(cell: Dict[str, Any], tag: str = CONFIG_TAG) -> Path:
+    """Relative result.json path under a config-sweep results root."""
+    return (
+        Path(cell["method"])
+        / "stead"
+        / f"{cell['n_stations']}st"
+        / cell["model"]
+        / cell["device"]
+        / f"cpus{cell['n_cpus']}"
+        / f"thr{cell['torch_threads']}"
+        / f"bs{cell['batch_size']}"
+        / cell["packaging"]
+        / tag
+        / "result.json"
+    )
 
 
 def _self_rss_mb() -> float:
@@ -95,11 +160,44 @@ def _window_spec(model: str) -> Tuple[int, int]:
     """(in_samples, overlap_samples) for each model on the 6000-sample STEAD net."""
     if model in ("PhaseNet", "PhaseNetLight"):
         return 3001, 0  # two windows / station
-    return 6000, 0  # EQT family + EQCCT: one window / station
+    return 6000, 0  # EQT family + EQCCT / EQCCTP: one window / station
+
+
+def _n_branches(model: str) -> int:
+    spec = MODELS[model]
+    if spec.get("branches"):
+        return len(spec["branches"])
+    return 1
+
+
+def _resolve_torch_threads(args) -> Optional[int]:
+    """Integer intra-op budget, or None (pin_threads uses n_cpus), or 0 (untuned)."""
+    tt = getattr(args, "torch_threads", None)
+    if tt is not None:
+        return int(tt)
+    mult = getattr(args, "thread_mult", None)
+    if mult is not None:
+        return threads_from_multiplier(int(args.n_cpus), float(mult))
+    return None
+
+
+def _resolve_interop_threads(args) -> Optional[int]:
+    """None = copy intra-op (legacy). Config sweep passes 1."""
+    val = getattr(args, "interop_threads", None)
+    if val is None:
+        return None
+    return max(1, int(val))
+
+
+def _effective_thr(args) -> int:
+    resolved = _resolve_torch_threads(args)
+    if resolved is None or resolved == 0:
+        return int(args.n_cpus)
+    return int(resolved)
 
 
 def _out_dir(args) -> Path:
-    thr = args.torch_threads if args.torch_threads is not None else args.n_cpus
+    thr = _effective_thr(args)
     bs = int(getattr(args, "batch_size", 256) or 256)
     packaging = str(getattr(args, "packaging", "merged") or "merged")
     return (
@@ -119,7 +217,7 @@ def _out_dir(args) -> Path:
 
 def _legacy_out_dir_bs256(args) -> Path:
     """Pre-batch-sweep / pre-packaging path; only used for resume of merged bs256."""
-    thr = args.torch_threads if args.torch_threads is not None else args.n_cpus
+    thr = _effective_thr(args)
     return (
         args.results_root
         / args.method
@@ -135,7 +233,7 @@ def _legacy_out_dir_bs256(args) -> Path:
 
 def _legacy_out_dir_merged_bs(args) -> Path:
     """Path used by the merged matrix after bs was added but before packaging/."""
-    thr = args.torch_threads if args.torch_threads is not None else args.n_cpus
+    thr = _effective_thr(args)
     bs = int(getattr(args, "batch_size", 256) or 256)
     return (
         args.results_root
@@ -222,6 +320,7 @@ def _run_annotate_precision_repeat(
     device: str,
     n_cpus: int,
     torch_threads: Optional[int],
+    interop_threads: Optional[int] = None,
     in_samples: int,
     overlap_samples: int,
     batch_size: int,
@@ -253,7 +352,11 @@ def _run_annotate_precision_repeat(
 
     st = StageTimes()
     with st.stage("framework_init"):
-        pin_threads(n_cpus, torch_threads=torch_threads)
+        pin_threads(
+            n_cpus,
+            torch_threads=torch_threads,
+            interop_threads=interop_threads,
+        )
         if gpu:
             try:
                 torch.cuda.reset_peak_memory_stats()
@@ -339,6 +442,12 @@ def _run_annotate_precision_repeat(
             "dtype": dtype,
             "n_branches": len(models),
             "packaging": packaging,
+            "torch_threads": (
+                int(torch_threads) if torch_threads not in (None, 0) else int(n_cpus)
+            ),
+            "interop_threads": (
+                int(interop_threads) if interop_threads is not None else None
+            ),
             "pick_extractor": "seisbench_classify_aggregate_offline",
             "offline_classify_aggregate_s": round(offline_pick_s, 4),
             "runtime_excludes_classify_aggregate": True,
@@ -376,21 +485,25 @@ def _worker_env(args, gpu: bool) -> Dict[str, str]:
             env["LD_LIBRARY_PATH"] = cudnn + ((":" + prev) if prev else "")
     else:
         env["CUDA_VISIBLE_DEVICES"] = ""
-    tt = getattr(args, "torch_threads", None)
+    tt = _resolve_torch_threads(args)
     keys = (
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
+        "TF_NUM_INTRAOP_THREADS",
     )
     if tt == 0:
         for k in keys:
             env.pop(k, None)
+        env.pop("TF_NUM_INTEROP_THREADS", None)
     else:
         val = str(tt if tt is not None else args.n_cpus)
         for k in keys:
             env[k] = val
+        inter = _resolve_interop_threads(args)
+        env["TF_NUM_INTEROP_THREADS"] = str(inter if inter is not None else val)
     return env
 
 
@@ -437,8 +550,14 @@ def _worker_argv(args, repeat_index: int) -> List[str]:
         "--repeat-index",
         str(repeat_index),
     ]
-    if args.torch_threads is not None:
-        argv += ["--torch-threads", str(args.torch_threads)]
+    tt = _resolve_torch_threads(args)
+    if tt is not None:
+        argv += ["--torch-threads", str(tt)]
+    if getattr(args, "thread_mult", None) is not None:
+        argv += ["--thread-mult", str(args.thread_mult)]
+    inter = _resolve_interop_threads(args)
+    if inter is not None:
+        argv += ["--interop-threads", str(inter)]
     return argv
 
 
@@ -455,7 +574,7 @@ def _pick_quality(manifest_path: Path, picks: Dict[str, Dict[str, List[float]]],
 
 def _fp32_picks_path(args) -> Path:
     """Sibling FP32 trial picks for the same cell (method swapped to annotate_fp32)."""
-    thr = args.torch_threads if args.torch_threads is not None else args.n_cpus
+    thr = _effective_thr(args)
     bs = int(getattr(args, "batch_size", 256) or 256)
     packaging = str(getattr(args, "packaging", "merged") or "merged")
     modern = (
@@ -555,7 +674,8 @@ def run_one_repeat(args) -> int:
             model_name=args.model,
             device=device,
             n_cpus=n_eff,
-            torch_threads=args.torch_threads,
+            torch_threads=_resolve_torch_threads(args),
+            interop_threads=_resolve_interop_threads(args),
             in_samples=in_samples,
             overlap_samples=overlap_samples,
             batch_size=args.batch_size,
@@ -786,11 +906,16 @@ def run_driver(args) -> int:
     n_windows = (
         len(fairness.window_starts(6000, in_samples, overlap_samples)) * args.n_stations
     )
-    n_branches = 2 if args.model == "EQCCT" else 1
-    thr = args.torch_threads if args.torch_threads is not None else args.n_cpus
+    n_branches = _n_branches(args.model)
+    thr = _effective_thr(args)
+    inter = _resolve_interop_threads(args)
     meta = dict(
         method=args.method,
-        family="annotate_precision",
+        family=(
+            "annotate_config"
+            if getattr(args, "thread_mult", None) is not None
+            else "annotate_precision"
+        ),
         dataset="stead",
         n_stations=args.n_stations,
         model=args.model,
@@ -799,6 +924,8 @@ def run_driver(args) -> int:
         device=args.device,
         n_cpus=args.n_cpus,
         torch_threads=thr,
+        thread_mult=getattr(args, "thread_mult", None),
+        interop_threads=inter,
         gpu_id=(args.gpu_id if gpu else None),
         in_samples=in_samples,
         overlap_samples=overlap_samples,
@@ -847,8 +974,22 @@ def main() -> int:
         "--torch-threads",
         type=int,
         default=None,
-        help="Torch/OpenMP thread budget. Default None = n_cpus. "
-        "Pass 0 for untuned SeisBench/torch defaults.",
+        help="Torch/OpenMP intra-op thread budget. Default None = n_cpus, or "
+        "derived from --thread-mult when that is set. Pass 0 for untuned defaults.",
+    )
+    ap.add_argument(
+        "--thread-mult",
+        type=float,
+        default=None,
+        help="Intra-op threads = round-half-up(mult * n_cpus), min 1. "
+        "Ignored when --torch-threads is set.",
+    )
+    ap.add_argument(
+        "--interop-threads",
+        type=int,
+        default=None,
+        help="PyTorch/TF inter-op thread count. Default None copies intra-op "
+        "(legacy). Config sweep passes 1.",
     )
     ap.add_argument("--gpu-id", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=256)

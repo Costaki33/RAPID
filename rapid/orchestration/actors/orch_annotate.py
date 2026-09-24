@@ -41,6 +41,7 @@ MODELS = {
             {"parent": "EQCCTS", "child": "original"},
         ],
     },
+    "EQCCTP": {"parent": "EQCCTP", "child": "original", "branches": None},
 }
 
 
@@ -163,6 +164,7 @@ class OrchAnnotateActor:
         annotate_batch_size: int = 512,
         overlap_samples: int = 0,
         gpus_to_use=False,
+        torch_threads: int = 1,
     ):
         self.logger = logging.getLogger("rapid.orch_annotate_actor")
         self.logger.setLevel(logging.INFO)
@@ -179,6 +181,13 @@ class OrchAnnotateActor:
 
         _ensure_rapid_on_path()
         import torch
+
+        n_thr = max(1, int(torch_threads))
+        torch.set_num_threads(n_thr)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
 
         if self.use_gpu and torch.cuda.is_available():
             self.device_str = "cuda:0"
@@ -238,10 +247,18 @@ def orch_ripper_classify(
     P_threshold: float = 0.3,
     S_threshold: float = 0.3,
     Detection_threshold: float = 0.3,
+    torch_threads: int = 1,
 ):
     """One-shot Ripper task: load model(s), classify, exit (max_calls=1)."""
     _ensure_rapid_on_path()
     import torch
+
+    n_thr = max(1, int(torch_threads))
+    torch.set_num_threads(n_thr)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
 
     gpu = bool(use_gpu) and torch.cuda.is_available()
     device_str = "cuda:0" if gpu else "cpu"
