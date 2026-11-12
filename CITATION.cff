@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "RAPID: Resource-Aware Parallel Inference Dispatcher"
+version: 1.0.1
+date-released: 2026-11-12
+authors:
+  - family-names: Skevofilax
+    given-names: Constantinos
+    name-particle: G.
+    orcid: https://orcid.org/0009-0004-7198-1990
+  - family-names: Muñoz
+    given-names: Camilo
+    name-particle: Eduardo
+    orcid: https://orcid.org/0000-0001-7324-3132
+  - family-names: Savvaidis
+    given-names: Alexandros
+    orcid: https://orcid.org/0000-0001-6373-5256
+repository-code: "https://github.com/Costaki33/RAPID"
+license: MIT
